@@ -1,0 +1,2153 @@
+// GReviewPilot — Authentication + Workspace schema
+// See /src/server/db/prisma.ts for the singleton client.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================
+// ENUMS
+// =========================================================
+
+enum UserRole {
+  SUPER_ADMIN
+  TENANT_OWNER
+  ADMIN
+  MANAGER
+  STAFF
+  VIEWER
+}
+
+enum UserStatus {
+  ACTIVE
+  PENDING
+  BLOCKED
+  DELETED
+}
+
+enum TenantStatus {
+  ACTIVE
+  TRIAL
+  SUSPENDED
+  CANCELLED
+  DELETED
+}
+
+enum TenantPlan {
+  TRIAL
+  STARTER
+  GROWTH
+  SCALE
+  ENTERPRISE
+}
+
+// Billing lifecycle. Kept independent from TenantStatus so a workspace
+// can be ACTIVE while its billing is PAST_DUE (grace window), etc.
+enum BillingStatus {
+  NONE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  UNPAID
+}
+
+enum AuditAction {
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  LOGOUT
+  SIGNUP
+  PASSWORD_CHANGED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+  EMAIL_VERIFICATION_SENT
+  EMAIL_VERIFIED
+  GOOGLE_LOGIN
+  GOOGLE_LINKED
+  SESSION_CREATED
+  SESSION_REFRESHED
+  SESSION_EXPIRED
+  SESSION_REVOKED
+  NEW_DEVICE_LOGIN
+  ROLE_CHANGED
+  USER_BLOCKED
+  TENANT_SUSPENDED
+  // Workspace lifecycle
+  WORKSPACE_CREATED
+  WORKSPACE_UPDATED
+  WORKSPACE_SETTINGS_UPDATED
+  WORKSPACE_LOGO_UPLOADED
+  WORKSPACE_LOGO_DELETED
+  WORKSPACE_REACTIVATED
+  // Business profile
+  BUSINESS_PROFILE_CREATED
+  BUSINESS_PROFILE_UPDATED
+  BUSINESS_CATEGORY_ADDED
+  BUSINESS_CATEGORY_REMOVED
+  BUSINESS_CATEGORY_PRIMARY_SET
+  BUSINESS_ATTRIBUTE_SET
+  BUSINESS_ATTRIBUTE_REMOVED
+  // Locations
+  LOCATION_CREATED
+  LOCATION_UPDATED
+  LOCATION_ARCHIVED
+  LOCATION_RESTORED
+  LOCATION_DELETED
+  LOCATION_HOURS_UPDATED
+  LOCATION_MANAGER_ASSIGNED
+  LOCATION_HOLIDAY_SET
+  LOCATION_HOLIDAY_REMOVED
+  // Team / invitations
+  USER_INVITED
+  INVITATION_RESENT
+  INVITATION_REVOKED
+  INVITATION_ACCEPTED
+  INVITATION_EXPIRED
+  USER_UPDATED
+  USER_REMOVED
+  USER_STATUS_CHANGED
+  USER_LOCATION_ASSIGNED
+  USER_LOCATION_UNASSIGNED
+  // Media
+  MEDIA_UPLOADED
+  MEDIA_UPDATED
+  MEDIA_DELETED
+  MEDIA_BULK_DELETED
+  // Google Business Integration
+  GOOGLE_ACCOUNT_CONNECTED
+  GOOGLE_ACCOUNT_DISCONNECTED
+  GOOGLE_TOKEN_REFRESHED
+  GOOGLE_SYNC_STARTED
+  GOOGLE_SYNC_COMPLETED
+  GOOGLE_SYNC_FAILED
+  GOOGLE_LOCATION_LINKED
+  GOOGLE_LOCATION_UNLINKED
+  // Reviews
+  REVIEW_SYNCED
+  REVIEW_REPLIED
+  REVIEW_REPLY_EDITED
+  REVIEW_REPLY_DELETED
+  REVIEW_TAGGED
+  REVIEW_TAG_REMOVED
+  REVIEW_ARCHIVED
+  REVIEW_UNARCHIVED
+  REVIEW_BULK_REPLIED
+  REVIEW_BULK_ARCHIVED
+  // Google Posts
+  POST_CREATED
+  POST_UPDATED
+  POST_PUBLISHED
+  POST_SCHEDULED
+  POST_DELETED
+  POST_DUPLICATED
+  // QR codes
+  QR_CREATED
+  QR_UPDATED
+  QR_DELETED
+  QR_ARCHIVED
+  // Website builder — site lifecycle
+  SITE_CREATED
+  SITE_UPDATED
+  SITE_DELETED
+  SITE_ARCHIVED
+  SITE_PUBLISHED
+  SITE_UNPUBLISHED
+  SITE_THEME_UPDATED
+  SITE_TEMPLATE_APPLIED
+  SITE_ROLLED_BACK
+  // Website builder — pages
+  SITE_PAGE_CREATED
+  SITE_PAGE_UPDATED
+  SITE_PAGE_DELETED
+  SITE_PAGE_DUPLICATED
+  SITE_PAGE_REORDERED
+  // Website builder — AI
+  SITE_AI_GENERATED
+  SITE_AI_EDITED
+  // Website builder — domains
+  SITE_DOMAIN_ADDED
+  SITE_DOMAIN_VERIFIED
+  SITE_DOMAIN_VERIFY_FAILED
+  SITE_DOMAIN_REMOVED
+  SITE_DOMAIN_PRIMARY_SET
+  SITE_SSL_ISSUED
+  /// A previously-valid certificate is inside the renewal window and has not
+  /// been replaced yet. Recorded so a renewal that silently stops working
+  /// leaves a trail before the certificate actually expires.
+  SITE_SSL_RENEWAL_DUE
+  /// The certificate expired, stopped being trusted, or CAA blocks issuance.
+  SITE_SSL_FAILED
+  // Website builder — CMS
+  CMS_COLLECTION_CREATED
+  CMS_COLLECTION_UPDATED
+  CMS_COLLECTION_DELETED
+  CMS_ITEM_CREATED
+  CMS_ITEM_UPDATED
+  CMS_ITEM_DELETED
+  CMS_ITEM_PUBLISHED
+  // Website builder — forms
+  SITE_FORM_CREATED
+  SITE_FORM_UPDATED
+  SITE_FORM_DELETED
+  SITE_FORM_SUBMISSION_RECEIVED
+}
+
+enum QrType {
+  GOOGLE_REVIEW
+  WEBSITE
+  WHATSAPP
+  SOCIAL_MEDIA
+  MENU
+  CUSTOM
+}
+
+enum QrStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum ReviewSource {
+  GOOGLE
+  MANUAL
+  IMPORTED
+}
+
+enum ReviewStatus {
+  NEW
+  REPLIED
+  ARCHIVED
+  FLAGGED
+}
+
+enum SentimentType {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  MIXED
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  FAILED
+  DELETED
+}
+
+enum PostType {
+  STANDARD // "What's New"
+  EVENT
+  OFFER
+  ALERT
+}
+
+enum PostCtaType {
+  BOOK
+  ORDER
+  SHOP
+  LEARN_MORE
+  SIGN_UP
+  CALL
+  NONE
+}
+
+enum GoogleAccountStatus {
+  CONNECTED
+  DISCONNECTED
+  TOKEN_EXPIRED
+  ERROR
+}
+
+enum SyncKind {
+  ACCOUNTS
+  LOCATIONS
+  BUSINESS_PROFILE
+  REVIEWS
+  POSTS
+  PHOTOS
+  QA
+  FULL
+}
+
+enum SyncStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+enum MediaCategory {
+  LOGO
+  COVER
+  AVATAR
+  GALLERY
+  BUSINESS_PHOTO
+  POST_MEDIA
+  REVIEW_MEDIA
+  QR_ASSET
+  DOCUMENT
+  /// Images uploaded from the website builder (hero images, gallery
+  /// slides, section backgrounds, etc.) — stored under WEBSITE_MEDIA_PATH
+  /// rather than the shared media root so a tenant's site assets can be
+  /// backed up/served independently of the rest of their media library.
+  WEBSITE_MEDIA
+  OTHER
+}
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  OTHER
+}
+
+enum MediaStatus {
+  PROCESSING
+  READY
+  FAILED
+  DELETED
+}
+
+enum MediaVisibility {
+  PRIVATE
+  PUBLIC
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+enum LocationStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+  DELETED
+}
+
+enum BusinessAttributeType {
+  BOOLEAN
+  TEXT
+  URL
+  NUMBER
+  ENUM
+}
+
+// =========================================================
+// TENANT (a.k.a. Workspace)
+//
+// One row per workspace. Every User belongs to exactly one Tenant.
+// The row carries three logical bundles:
+//   1. Profile      — name, slug, contact, locale
+//   2. Preferences  — settings JSON blob (structured for expansion)
+//   3. Subscription — plan, billing status, gateway customer IDs
+//
+// Free-form JSON columns (address / socialLinks / taxInfo / metadata
+// / settings) keep the module extensible without a migration on every
+// UI tweak. Columns with query semantics (industry, status, plan) stay
+// scalar so we can index on them.
+// =========================================================
+
+model Tenant {
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
+
+  // ---------- Branding ----------
+  // Opaque reference produced by the file-storage abstraction
+  // (see src/server/storage). Never a raw upload payload.
+  logo String? @db.Text
+
+  // ---------- Contact ----------
+  businessEmail String?
+  phone         String?
+  website       String? @db.VarChar(500)
+
+  // ---------- Business categorisation ----------
+  industry      String?
+  businessType  String?
+  employeeCount String?
+
+  // ---------- Locale ----------
+  country  String? // ISO 3166-1 alpha-2
+  timezone String  @default("UTC")
+  currency String  @default("USD") @db.Char(3) // ISO 4217
+  language String  @default("en") @db.VarChar(10) // BCP-47
+
+  // ---------- Structured JSON blobs ----------
+  // Address:      { line1, line2, city, state, postalCode, country }
+  // SocialLinks:  { linkedin, twitter, facebook, instagram, youtube, ... }
+  // TaxInfo:      { taxId, vatNumber, country, exempt }
+  // Metadata:     free-form key/value for future modules
+  // Settings:     workspace preferences (date/time format, notifications, theme, businessHours)
+  address     Json?
+  socialLinks Json?
+  taxInfo     Json?
+  metadata    Json?
+  settings    Json?
+
+  // ---------- Lifecycle ----------
+  status          TenantStatus @default(TRIAL)
+  suspendedAt     DateTime?
+  suspendedReason String?      @db.VarChar(500)
+  reactivatedAt   DateTime?
+
+  // ---------- Subscription (prepared, not yet wired to a gateway) ----------
+  plan                TenantPlan    @default(TRIAL)
+  billingStatus       BillingStatus @default(TRIALING)
+  trialStartAt        DateTime?
+  trialEndsAt         DateTime?
+  subscriptionStartAt DateTime?
+  subscriptionEndAt   DateTime?
+  stripeCustomerId    String?       @unique
+  razorpayCustomerId  String?       @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users               User[]
+  sessions            UserSession[]
+  auditLogs           AuditLog[]
+  businessProfile     BusinessProfile?
+  locations           Location[]
+  invitations         Invitation[]
+  locationAssignments LocationAssignment[]
+  mediaAssets         MediaAsset[]
+  googleAccounts      GoogleAccount[]
+  googleLocations     GoogleLocation[]
+  syncRuns            SyncRun[]
+  reviews             Review[]
+  reviewTags          ReviewTag[]
+  posts               GooglePost[]
+  privateFeedback     PrivateFeedback[]
+  qrCodes             QrCode[]
+  qrScans             QrScan[]
+  aiInsights          AiInsight[]
+  sites               Site[]
+
+  @@index([status])
+  @@index([plan])
+  @@index([billingStatus])
+}
+
+// =========================================================
+// USER
+// =========================================================
+
+model User {
+  id               String     @id @default(cuid())
+  tenantId         String
+  firstName        String
+  lastName         String
+  email            String     @unique
+  passwordHash     String?    @db.Text
+  avatar           String?    @db.Text
+  phone            String?
+  role             UserRole   @default(TENANT_OWNER)
+  status           UserStatus @default(PENDING)
+  emailVerified    DateTime?
+  lastLoginAt      DateTime?
+  failedLoginCount Int        @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accounts            Account[]
+  sessions            UserSession[]
+  verificationTokens  VerificationToken[]
+  passwordResetTokens PasswordResetToken[]
+  auditLogs           AuditLog[]
+  managedLocations    Location[]           @relation("LocationManager")
+  locationAssignments LocationAssignment[] @relation("UserLocationAssignments")
+  assignmentsGranted  LocationAssignment[] @relation("AssignmentsGranted")
+  invitationsSent     Invitation[]         @relation("InvitationInvitedBy")
+  invitationAccepted  Invitation?          @relation("InvitationAcceptedBy")
+  mediaUploaded       MediaAsset[]         @relation("MediaUploader")
+  googleAccounts      GoogleAccount[]      @relation("GoogleAccountConnector")
+  syncRunsTriggered   SyncRun[]            @relation("SyncRunTriggerer")
+  reviewReplies       ReviewReply[]        @relation("ReviewReplier")
+  postsCreated        GooglePost[]         @relation("PostCreator")
+  qrCodesCreated      QrCode[]             @relation("QrCreator")
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+// =========================================================
+// ACCOUNT (Auth.js OAuth link)
+// =========================================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// =========================================================
+// USER SESSION (multi-device tracking, source of truth
+// for revocation. JWT strategy still applies for stateless
+// client cookies; server compares hashed jti here.)
+// =========================================================
+
+model UserSession {
+  id               String    @id @default(cuid())
+  userId           String
+  tenantId         String
+  sessionTokenHash String    @unique
+  refreshTokenHash String?   @unique
+  ipAddress        String?
+  userAgent        String?   @db.Text
+  browser          String?
+  os               String?
+  device           String?
+  country          String?
+  lastActivityAt   DateTime  @default(now())
+  expiresAt        DateTime
+  isActive         Boolean   @default(true)
+  revokedAt        DateTime?
+  revokedReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+  @@index([tenantId])
+  @@index([expiresAt])
+}
+
+// =========================================================
+// VERIFICATION TOKEN (email verify + change-email)
+// =========================================================
+
+model VerificationToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  email      String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// =========================================================
+// PASSWORD RESET TOKEN
+// =========================================================
+
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  ipAddress  String?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// =========================================================
+// AUDIT LOG
+// =========================================================
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  userId    String?
+  tenantId  String?
+  action    AuditAction
+  ipAddress String?
+  userAgent String?     @db.Text
+  browser   String?
+  device    String?
+  metadata  Json?
+  createdAt DateTime    @default(now())
+
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// =========================================================
+// EMAIL OTP (pre-signup and change-email verification)
+//
+// Kept separate from VerificationToken because those require
+// a user row; OTPs must exist before the user is created.
+// =========================================================
+
+model EmailOtp {
+  id         String    @id @default(cuid())
+  email      String
+  codeHash   String
+  purpose    String // "signup" | "change_email"
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  ipAddress  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([email, purpose])
+  @@index([expiresAt])
+}
+
+// =========================================================
+// BUSINESS PROFILE (extended data, 1:1 with Tenant)
+//
+// Tenant carries identity, billing, and light contact info.
+// BusinessProfile carries the marketing/customer-facing profile
+// used in Google Business, review pages, and the review funnel:
+//   description, cover image, categories, attributes, founding
+//   year, tax/registration IDs.
+// =========================================================
+
+model BusinessProfile {
+  id                 String   @id @default(cuid())
+  tenantId           String   @unique
+  legalName          String?
+  description        String?  @db.Text
+  shortDescription   String?  @db.VarChar(500)
+  coverImage         String?  @db.Text
+  foundedYear        Int?
+  registrationNumber String?
+  gstNumber          String?
+  taxNumber          String?
+  primaryCategoryId  String?
+  metadata           Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  primaryCategory BusinessCategory?        @relation("PrimaryCategory", fields: [primaryCategoryId], references: [id], onDelete: SetNull)
+  categories      TenantBusinessCategory[]
+  attributes      BusinessAttribute[]
+
+  @@index([tenantId])
+  @@index([primaryCategoryId])
+}
+
+// =========================================================
+// BUSINESS CATEGORY CATALOG
+//
+// Global, Google-aligned catalog of business categories. Seeded via
+// prisma/seed script. Tenants pick categories from here; they don't
+// create catalog rows directly.
+// =========================================================
+
+model BusinessCategory {
+  id               String   @id @default(cuid())
+  slug             String   @unique
+  name             String
+  googleCategoryId String?  @unique
+  parentId         String?
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  parent   BusinessCategory?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children BusinessCategory[] @relation("CategoryTree")
+
+  tenantSelections  TenantBusinessCategory[]
+  primaryOfProfiles BusinessProfile[]        @relation("PrimaryCategory")
+
+  @@index([parentId])
+  @@index([isActive])
+  @@index([name])
+}
+
+// M:N join — a tenant's chosen additional categories. The primary
+// category is denormalised onto BusinessProfile.primaryCategoryId
+// so it can be fetched without a join.
+model TenantBusinessCategory {
+  id         String   @id @default(cuid())
+  profileId  String
+  categoryId String
+  createdAt  DateTime @default(now())
+
+  profile  BusinessProfile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  category BusinessCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, categoryId])
+  @@index([categoryId])
+}
+
+// =========================================================
+// BUSINESS ATTRIBUTES
+//
+// Free-form key/value pairs mirroring Google's attribute system
+// (has_wifi = true, accepts_credit_cards = true, menu_url = "...").
+// Kept as a table (not JSON on BusinessProfile) so we can index by
+// key across tenants for aggregate analytics later.
+// =========================================================
+
+model BusinessAttribute {
+  id        String                @id @default(cuid())
+  profileId String
+  key       String
+  value     String                @db.Text
+  type      BusinessAttributeType @default(TEXT)
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+
+  profile BusinessProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, key])
+  @@index([profileId])
+  @@index([key])
+}
+
+// =========================================================
+// LOCATION (branches / physical outlets)
+//
+// A tenant is the business; Locations are its branches. Each Location
+// is what Google Business Profile calls a "location" and has its own
+// Google Location ID, working hours, contact info, and manager.
+//
+// Working hours are stored as a Json blob to avoid the row explosion
+// of a per-day-per-location table. Structure enforced by Zod at the
+// service boundary (see business.schema.ts / workingHoursSchema).
+// Holiday hours are relational because they're event-driven and
+// queried by date.
+// =========================================================
+
+model Location {
+  id        String  @id @default(cuid())
+  tenantId  String
+  name      String
+  slug      String
+  storeCode String?
+
+  // Address
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String?
+  postalCode   String?
+  country      String  @db.Char(2) // ISO 3166-1 alpha-2
+
+  // Geo
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+
+  // Google Business Profile IDs (populated once the location is linked)
+  googleLocationId String? @unique
+  googlePlaceId    String?
+  // "official" (via OAuth sync) | "manual" (Quick Connect via Maps URL/Place ID)
+  placeIdSource    String?
+
+  // Contact
+  phone   String?
+  email   String?
+  website String? @db.VarChar(500)
+
+  // Working hours — see workingHoursSchema in validators/business.schema.ts
+  workingHours Json?
+  timezone     String? // override for tenant-level timezone
+
+  status LocationStatus @default(ACTIVE)
+
+  assignedManagerId String?
+
+  archivedAt DateTime?
+  deletedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant           Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedManager  User?                  @relation("LocationManager", fields: [assignedManagerId], references: [id], onDelete: SetNull)
+  holidayHours     HolidayHours[]
+  assignments      LocationAssignment[]
+  media            MediaAsset[]
+  googleLocations  GoogleLocation[]
+  reviews          Review[]
+  posts            GooglePost[]
+  privateFeedback  PrivateFeedback[]
+  reviewProfile    LocationReviewProfile?
+  qrCodes          QrCode[]
+  generatedReviews GeneratedReviewText[]
+  sites            Site[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, status])
+  @@index([tenantId, deletedAt])
+  @@index([googlePlaceId])
+  @@index([assignedManagerId])
+}
+
+// =========================================================
+// HOLIDAY HOURS (per location, per date)
+//
+// Overrides regular working hours on specific dates (public holidays,
+// special events, closures). Time strings are stored as "HH:mm".
+// =========================================================
+
+model HolidayHours {
+  id         String   @id @default(cuid())
+  locationId String
+  date       DateTime @db.Date
+  isClosed   Boolean  @default(false)
+  openTime   String?  @db.VarChar(5)
+  closeTime  String?  @db.VarChar(5)
+  note       String?  @db.VarChar(255)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([locationId, date])
+  @@index([date])
+}
+
+// =========================================================
+// INVITATION (team invites)
+//
+// A tenant admin invites a user by email + role. We store only the
+// SHA-256 of the invite token; the raw token is emailed once. On
+// accept, we create the User row and mark the invitation ACCEPTED.
+//
+// Multiple invitations per (tenant, email) are allowed historically,
+// but only one PENDING at a time — enforced in the service layer by
+// revoking any prior pending record when a new invite is issued.
+// =========================================================
+
+model Invitation {
+  id           String           @id @default(cuid())
+  tenantId     String
+  email        String
+  firstName    String?
+  lastName     String?
+  role         UserRole         @default(STAFF)
+  message      String?          @db.VarChar(1000)
+  tokenHash    String           @unique
+  status       InvitationStatus @default(PENDING)
+  expiresAt    DateTime
+  invitedById  String?
+  acceptedById String?          @unique
+  acceptedAt   DateTime?
+  revokedById  String?
+  revokedAt    DateTime?
+  metadata     Json? // e.g. { locationIds: [] } — locations to auto-assign on accept
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invitedBy  User?  @relation("InvitationInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  acceptedBy User?  @relation("InvitationAcceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([email])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([tenantId, status])
+}
+
+// =========================================================
+// LOCATION ASSIGNMENT (User ↔ Location, many-to-many)
+//
+// Distinct from Location.assignedManagerId (which is the single
+// primary manager). A user can be assigned to multiple locations
+// as staff. Unassignment is soft via `unassignedAt`, but the row
+// is usually deleted outright — kept as an option for auditability.
+// =========================================================
+
+model LocationAssignment {
+  id           String    @id @default(cuid())
+  tenantId     String
+  locationId   String
+  userId       String
+  assignedById String?
+  assignedAt   DateTime  @default(now())
+  unassignedAt DateTime?
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  user       User     @relation("UserLocationAssignments", fields: [userId], references: [id], onDelete: Cascade)
+  assignedBy User?    @relation("AssignmentsGranted", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@unique([locationId, userId])
+  @@index([tenantId])
+  @@index([userId])
+  @@index([locationId])
+}
+
+// =========================================================
+// MEDIA ASSET
+//
+// Central registry for every file uploaded to the platform: logos,
+// covers, gallery photos, business photos, post/review media, QR
+// exports, documents, and user avatars.
+//
+// The physical bytes live behind a StorageProvider (local disk /
+// S3 / Cloudinary). `storageKey` is the opaque handle within that
+// provider — never a raw URL. Public URLs are constructed at read
+// time via the provider so we can swap backends without a migration.
+//
+// Deduplication happens per-tenant on `sha256`. Two uploads with the
+// same content share a MediaAsset row, saving both storage and index
+// space; hard-delete waits for the last reference.
+// =========================================================
+
+model MediaAsset {
+  id         String          @id @default(cuid())
+  tenantId   String
+  storageKey String          @unique
+  filename   String
+  mimeType   String
+  kind       MediaKind       @default(OTHER)
+  category   MediaCategory   @default(OTHER)
+  sizeBytes  BigInt
+  sha256     String          @db.Char(64)
+  width      Int?
+  height     Int?
+  duration   Int? // seconds; for AV media
+  altText    String?         @db.VarChar(500)
+  caption    String?         @db.VarChar(1000)
+  visibility MediaVisibility @default(PRIVATE)
+  status     MediaStatus     @default(READY)
+  metadata   Json? // provider-specific (etag, cdn, exif, etc.)
+
+  locationId   String?
+  uploadedById String?
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  uploadedBy User?     @relation("MediaUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, sha256])
+  @@index([tenantId, category])
+  @@index([tenantId, status])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, kind])
+  @@index([locationId])
+}
+
+// =========================================================
+// GOOGLE ACCOUNT (Business Profile OAuth connection)
+//
+// Distinct from Auth.js `Account` (user sign-in). This represents a
+// business-side Google Business Profile connection: OAuth tokens for
+// the `business.manage` scope, tied to a tenant, granted by a user.
+//
+// Tokens are AES-256-GCM encrypted before persistence (see
+// src/server/utils/crypto.ts). Only the encrypted blob is ever stored.
+// =========================================================
+
+model GoogleAccount {
+  id                String              @id @default(cuid())
+  tenantId          String
+  googleAccountId   String? // e.g. "accounts/12345" — populated after first list call
+  googleAccountName String? // display name
+  email             String
+  accessToken       String              @db.Text // AES-GCM encrypted
+  refreshToken      String              @db.Text // AES-GCM encrypted
+  tokenType         String              @default("Bearer")
+  expiresAt         DateTime
+  scopes            String              @db.Text
+  status            GoogleAccountStatus @default(CONNECTED)
+  connectedById     String?
+  lastSyncedAt      DateTime?
+  lastSyncError     String?             @db.Text
+  metadata          Json?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  connectedBy     User?            @relation("GoogleAccountConnector", fields: [connectedById], references: [id], onDelete: SetNull)
+  googleLocations GoogleLocation[]
+  syncRuns        SyncRun[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId, status])
+  @@index([status])
+}
+
+// =========================================================
+// GOOGLE LOCATION (mirror of Google Business Profile locations)
+//
+// One row per location surfaced by Google. `localLocationId` links it
+// to our own Location model — nullable so admins can decide which
+// Google locations to sync into their workspace. `dataHash` guards
+// against no-op updates on sync.
+// =========================================================
+
+model GoogleLocation {
+  id                 String   @id @default(cuid())
+  tenantId           String
+  googleAccountId    String
+  googleLocationName String // full resource name: "accounts/{a}/locations/{l}"
+  googleLocationId   String // just the location id
+  googlePlaceId      String?
+  title              String
+  storeCode          String?
+  primaryCategory    String?
+  addressLine        String?
+  city               String?
+  state              String?
+  postalCode         String?
+  country            String?
+  phone              String?
+  websiteUri         String?
+  raw                Json
+  dataHash           String // sha256 of `raw` — skip write if unchanged
+  localLocationId    String?
+  syncedAt           DateTime @default(now())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  googleAccount GoogleAccount @relation(fields: [googleAccountId], references: [id], onDelete: Cascade)
+  localLocation Location?     @relation(fields: [localLocationId], references: [id], onDelete: SetNull)
+
+  @@unique([googleAccountId, googleLocationName])
+  @@index([tenantId])
+  @@index([localLocationId])
+}
+
+// =========================================================
+// SYNC RUN (observability for every Google → GReviewPilot sync)
+//
+// Written to on every trigger — manual or scheduled. UI reads this
+// table for the "last sync" widget + full history page. Retained
+// forever unless the workspace is deleted.
+// =========================================================
+
+model SyncRun {
+  id              String     @id @default(cuid())
+  tenantId        String
+  googleAccountId String?
+  kind            SyncKind
+  status          SyncStatus @default(PENDING)
+  startedAt       DateTime   @default(now())
+  finishedAt      DateTime?
+  itemsProcessed  Int        @default(0)
+  itemsCreated    Int        @default(0)
+  itemsUpdated    Int        @default(0)
+  itemsFailed     Int        @default(0)
+  errorMessage    String?    @db.Text
+  triggeredById   String?
+  metadata        Json?
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  googleAccount GoogleAccount? @relation(fields: [googleAccountId], references: [id], onDelete: SetNull)
+  triggeredBy   User?          @relation("SyncRunTriggerer", fields: [triggeredById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, kind])
+  @@index([tenantId, startedAt])
+  @@index([status])
+}
+
+// =========================================================
+// REVIEW
+//
+// Central review model. Synced from Google or created manually.
+// Stores the raw Google review JSON for reference and extracts
+// all queryable fields into dedicated columns so SQL-level filtering
+// (by rating, date, sentiment, status) is fast without scanning JSON.
+//
+// Reply history is modeled as a separate ReviewReply table (1:N)
+// so edits and deletions are tracked without mutating the review row.
+// Only the last reply where `deletedAt IS NULL` is the "active" one.
+// =========================================================
+
+model Review {
+  id         String       @id @default(cuid())
+  tenantId   String
+  locationId String?
+  source     ReviewSource @default(GOOGLE)
+  status     ReviewStatus @default(NEW)
+
+  // Google-specific IDs — null for manual reviews.
+  googleReviewId   String? @unique
+  googleReviewName String? @unique // full resource name
+
+  // Reviewer
+  reviewerName        String?
+  reviewerPhotoUrl    String? @db.Text
+  reviewerIsAnonymous Boolean @default(false)
+
+  // Content
+  starRating      Int // 1–5
+  comment         String?   @db.Text
+  reviewCreatedAt DateTime // original review timestamp (from Google or user input)
+  reviewUpdatedAt DateTime? // when the reviewer edited their comment
+
+  // Sentiment (populated by AI service in Module 11)
+  sentiment         SentimentType?
+  sentimentScore    Decimal?       @db.Decimal(4, 3) // -1.0 to 1.0
+  sentimentKeywords Json? // string[]
+
+  // Sync metadata
+  googleRaw Json? // full raw JSON from Google
+  dataHash  String? // sha256 of raw — skip no-op updates
+  syncedAt  DateTime?
+
+  // Flags
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location Location?       @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  replies  ReviewReply[]
+  tags     ReviewTagLink[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, locationId])
+  @@index([tenantId, starRating])
+  @@index([tenantId, sentiment])
+  @@index([tenantId, reviewCreatedAt])
+  @@index([tenantId, isArchived])
+}
+
+// =========================================================
+// REVIEW REPLY
+//
+// 1:N from Review. The "current" reply is the latest row where
+// `deletedAt IS NULL`. Old replies are kept for the timeline view.
+// Supports owner replies AND Google-synced replies.
+// =========================================================
+
+model ReviewReply {
+  id               String    @id @default(cuid())
+  reviewId         String
+  comment          String    @db.Text
+  repliedById      String?
+  isFromGoogle     Boolean   @default(false)
+  googleUpdateTime DateTime?
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  review    Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  repliedBy User?  @relation("ReviewReplier", fields: [repliedById], references: [id], onDelete: SetNull)
+
+  @@index([reviewId, deletedAt])
+}
+
+// =========================================================
+// REVIEW TAG (tenant-scoped labels)
+//
+// Tags like "urgent", "VIP", "complaint", "follow-up". Users can
+// create/edit/delete tags, then attach them to reviews via the M:N
+// join table.
+// =========================================================
+
+model ReviewTag {
+  id       String  @id @default(cuid())
+  tenantId String
+  name     String
+  color    String? @db.VarChar(7) // hex, e.g. "#ef4444"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reviews ReviewTagLink[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model ReviewTagLink {
+  id       String   @id @default(cuid())
+  reviewId String
+  tagId    String
+  addedAt  DateTime @default(now())
+
+  review Review    @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  tag    ReviewTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([reviewId, tagId])
+  @@index([tagId])
+}
+
+// =========================================================
+// GOOGLE POST
+//
+// A post (Google calls it "Local Post") is a piece of content published
+// to one or more Google Business Profile locations. Supports four types:
+//   STANDARD ("What's New"), EVENT, OFFER, ALERT.
+//
+// Posts can be drafted, scheduled for future publish, published immediately,
+// or duplicated from an existing post. Media references point to our
+// MediaAsset table by ID.
+//
+// Once published to Google, `googlePostName` stores the resource name
+// so we can track performance metrics (views, clicks) later.
+// =========================================================
+
+model GooglePost {
+  id         String  @id @default(cuid())
+  tenantId   String
+  locationId String?
+
+  // Content
+  type     PostType    @default(STANDARD)
+  status   PostStatus  @default(DRAFT)
+  title    String?     @db.VarChar(300)
+  body     String      @db.Text
+  mediaIds Json? // string[] — MediaAsset IDs
+  ctaType  PostCtaType @default(NONE)
+  ctaUrl   String?     @db.VarChar(1000)
+
+  // Event / offer specific
+  eventTitle      String?   @db.VarChar(300)
+  startDate       DateTime?
+  endDate         DateTime?
+  couponCode      String?   @db.VarChar(100)
+  termsConditions String?   @db.Text
+  redeemOnlineUrl String?   @db.VarChar(1000)
+
+  // Scheduling
+  scheduledAt DateTime?
+  publishedAt DateTime?
+  failedAt    DateTime?
+  failReason  String?   @db.Text
+
+  // Google sync
+  googlePostName String?   @unique // resource name once published
+  googleRaw      Json?
+  syncedAt       DateTime?
+
+  // Performance (populated by future sync job)
+  viewCount  Int @default(0)
+  clickCount Int @default(0)
+
+  // Lineage
+  createdById      String?
+  duplicatedFromId String?
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location       Location?    @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  createdBy      User?        @relation("PostCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  duplicatedFrom GooglePost?  @relation("PostDuplicates", fields: [duplicatedFromId], references: [id], onDelete: SetNull)
+  duplicates     GooglePost[] @relation("PostDuplicates")
+
+  @@index([tenantId, status])
+  @@index([tenantId, locationId])
+  @@index([tenantId, scheduledAt])
+  @@index([tenantId, deletedAt])
+}
+
+// =========================================================
+// REVIEW FUNNEL EVENT (tracking customer journey)
+//
+// Tracks each step of the AI review funnel: page view, star
+// selection, review generated, copied, redirected to Google.
+// Used for conversion analytics (Module 8). One row per event,
+// not per session — allows granular funnel analysis.
+// =========================================================
+
+enum FunnelStep {
+  PAGE_VIEW
+  STAR_SELECTED
+  REVIEW_GENERATED
+  REVIEW_COPIED
+  REDIRECTED_TO_GOOGLE
+  PRIVATE_FEEDBACK
+}
+
+enum FeedbackStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+  DISMISSED
+}
+
+model ReviewFunnelEvent {
+  id         String     @id @default(cuid())
+  tenantId   String
+  locationId String?
+  step       FunnelStep
+  starRating Int? // 1–5, populated from STAR_SELECTED onward
+  sessionId  String // anonymous browser fingerprint (UUID stored in sessionStorage)
+  ipAddress  String?
+  userAgent  String?    @db.Text
+  device     String?
+  referrer   String?    @db.VarChar(500)
+  metadata   Json?
+  createdAt  DateTime   @default(now())
+
+  @@index([tenantId, step])
+  @@index([tenantId, locationId, step])
+  @@index([tenantId, createdAt])
+  @@index([sessionId])
+}
+
+// =========================================================
+// PRIVATE FEEDBACK (feedback funnel — low ratings)
+//
+// When a customer rates 1-3 stars in the funnel, we route them to a
+// private feedback form instead of straight to Google. This captures
+// the complaint internally so the business can make it right before
+// it becomes a public negative review. The customer is never blocked
+// from posting publicly — they're simply offered a private channel
+// first (the compliant, industry-standard "feedback funnel").
+// =========================================================
+
+model PrivateFeedback {
+  id            String         @id @default(cuid())
+  tenantId      String
+  locationId    String?
+  rating        Int // 1–5 (usually 1–3)
+  comment       String         @db.Text
+  customerName  String?
+  customerPhone String?
+  customerEmail String?
+  status        FeedbackStatus @default(NEW)
+  resolvedById  String?
+  resolvedAt    DateTime?
+  internalNote  String?        @db.Text
+  sessionId     String?
+  ipAddress     String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@index([locationId])
+}
+
+// =========================================================
+// LOCATION REVIEW PROFILE (AI review context, 1:1 with Location)
+//
+// Everything the AI needs to write specific, on-brand, SEO-aware
+// reviews for a location instead of generic ones. Tenants supply the
+// raw inputs (description, highlights, keywords, GMB link) and our AI
+// synthesizes `aiContext` — a compact brief the review generator
+// injects into every prompt.
+//
+// Example for a hospital:
+//   highlights: ["cleanliness", "expert doctors", "short wait times",
+//                "caring nursing staff", "modern equipment"]
+//   keywords:   ["best hospital in Pune", "emergency care", "cardiology"]
+// =========================================================
+
+model LocationReviewProfile {
+  id         String @id @default(cuid())
+  tenantId   String
+  locationId String @unique
+
+  gmbProfileUrl    String?   @db.VarChar(1000)
+  // Public business website. The AI agent fetches this page, extracts
+  // business info, and stores it as a draft (websiteSummary) that feeds
+  // review generation.
+  websiteUrl       String?   @db.VarChar(1000)
+  websiteSummary   String?   @db.Text // AI-extracted draft brief from the website
+  websiteFetchedAt DateTime?
+  businessType     String? // e.g. "Multi-specialty Hospital"
+  description      String?   @db.Text // tenant-written blurb
+  highlights       Json? // string[] — themes to weave into reviews
+  keywords         Json? // string[] — SEO keywords to include naturally
+  tone             String    @default("warm") // warm | professional | casual | enthusiastic
+  languages        Json? // string[] BCP-47, e.g. ["en","hi"] — future multilingual
+
+  // AI-synthesized brief (from the inputs above + category knowledge).
+  aiContext     String?   @db.Text
+  synthesizedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+// =========================================================
+// GENERATED REVIEW TEXT (uniqueness ledger)
+//
+// Every AI-generated review option is fingerprinted and stored here so
+// no two customers are ever served the same (or a near-duplicate)
+// review — not even a single one. The [locationId, hash] unique index
+// guarantees uniqueness per location; recent texts are also fed back
+// into the prompt as an "avoid" list.
+// =========================================================
+model GeneratedReviewText {
+  id         String   @id @default(cuid())
+  tenantId   String
+  locationId String
+  hash       String // normalized-text fingerprint
+  text       String   @db.Text
+  starRating Int
+  sessionId  String?
+  createdAt  DateTime @default(now())
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([locationId, hash])
+  @@index([tenantId])
+  @@index([locationId, createdAt])
+}
+
+// =========================================================
+// QR CODE (dynamic, trackable)
+//
+// The QR image encodes {APP_URL}/q/{shortCode} — a redirect endpoint
+// that logs the scan then 302s to `targetUrl`. This makes every QR:
+//   - dynamic  (edit the target without reprinting the code)
+//   - trackable (total/unique scans, device, browser, country)
+//
+// Types map to how `targetUrl` is built (Google review link, website,
+// wa.me link, social profile, menu, or a custom URL).
+// =========================================================
+
+model QrCode {
+  id         String   @id @default(cuid())
+  tenantId   String
+  locationId String?
+  type       QrType   @default(CUSTOM)
+  label      String
+  targetUrl  String   @db.VarChar(2000)
+  shortCode  String   @unique
+  status     QrStatus @default(ACTIVE)
+
+  // Styling (used at render time)
+  darkColor  String? @db.VarChar(7)
+  lightColor String? @db.VarChar(7)
+
+  // Denormalized scan counters (source of truth is QrScan rows).
+  scanCount       Int       @default(0)
+  uniqueScanCount Int       @default(0)
+  lastScannedAt   DateTime?
+
+  createdById String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location  Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  createdBy User?     @relation("QrCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  scans     QrScan[]
+
+  @@index([tenantId, type])
+  @@index([tenantId, status])
+  @@index([locationId])
+}
+
+// =========================================================
+// QR SCAN (one row per scan event)
+// =========================================================
+
+model QrScan {
+  id        String   @id @default(cuid())
+  qrCodeId  String
+  tenantId  String
+  sessionId String? // cookie-based visitor id for unique counting
+  isUnique  Boolean  @default(false)
+  ipAddress String?
+  userAgent String?  @db.Text
+  browser   String?
+  os        String?
+  device    String?
+  country   String? // ISO-2 from edge headers (cf-ipcountry / x-vercel-ip-country)
+  referrer  String?  @db.VarChar(500)
+  createdAt DateTime @default(now())
+
+  qrCode QrCode @relation(fields: [qrCodeId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([qrCodeId, createdAt])
+  @@index([tenantId, createdAt])
+  @@index([country])
+}
+
+// =========================================================
+// AI INSIGHT (cached AI-generated reports)
+//
+// Generating a narrative report costs an AI call, so results are cached
+// per tenant + kind + scope and reused until explicitly regenerated or
+// the TTL lapses. `payload` holds the structured report so the shape can
+// evolve per kind without a migration.
+//
+// Reused by every AI reporting module (review insights today; health
+// score, competitor intel, website audit later).
+// =========================================================
+
+enum AiInsightKind {
+  REVIEW_INSIGHTS
+  HEALTH_SCORE
+  COMPETITOR
+  WEBSITE_AUDIT
+  ACTION_CENTER
+}
+
+model AiInsight {
+  id       String        @id @default(cuid())
+  tenantId String
+  kind     AiInsightKind
+
+  /// Optional narrowing (e.g. a single location). NULL = whole workspace.
+  locationId String?
+  /// Window the report covers, in days — part of the cache key.
+  periodDays Int     @default(90)
+
+  /// Structured report body. Shape depends on `kind`.
+  payload Json
+  /// How the report was produced: "ai" | "heuristic".
+  source  String @default("ai")
+
+  /// Number of records the report was computed from — lets the UI warn
+  /// when a report is stale relative to current data.
+  sampleSize Int @default(0)
+
+  generatedAt   DateTime @default(now())
+  generatedById String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, kind, locationId, periodDays])
+  @@index([tenantId, kind])
+  @@index([tenantId, generatedAt])
+}
+
+// =========================================================
+// WEBSITE BUILDER
+//
+// A tenant can own multiple Sites. Each Site owns Pages, and each Page
+// carries a `document` JSON blob — the normalized node tree described in
+// src/site/document/types.ts.
+//
+// Why JSON instead of a `SiteNode` table?
+//   A page edit in a visual builder touches dozens of nodes at once
+//   (drag a section, restyle a theme). Row-per-node would turn every
+//   keystroke into an N-row transaction and every render into a
+//   recursive join. The document is always read and written whole, is
+//   only ever queried by page (never "find all Heading nodes"), and
+//   must be snapshot-able for revisions/rollback. JSON is the correct
+//   shape. Validation happens in Zod at the service boundary instead of
+//   in the DB.
+//
+// `SitePage.document` is the editable draft. `SitePage.publishedDocument`
+// is the immutable snapshot the public renderer serves, so editing is
+// never visible to visitors until publish.
+// =========================================================
+
+enum SiteStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+  DELETED
+}
+
+enum SitePageStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum SiteRevisionKind {
+  AUTOSAVE
+  MANUAL
+  AI_EDIT
+  PUBLISH
+  ROLLBACK
+  TEMPLATE_APPLY
+}
+
+enum SiteDomainStatus {
+  PENDING // record created, DNS not configured yet
+  VERIFYING // DNS lookup in progress / propagating
+  CONNECTED
+  FAILED
+  REMOVED
+}
+
+enum SiteSslStatus {
+  NONE
+  PENDING
+  ACTIVE
+  FAILED
+  EXPIRED
+}
+
+enum SiteAiRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum CmsFieldKind {
+  TEXT
+  RICH_TEXT
+  NUMBER
+  BOOLEAN
+  DATE
+  IMAGE
+  GALLERY
+  LINK
+  EMAIL
+  PHONE
+  SELECT
+  MULTI_SELECT
+  REFERENCE
+  COLOR
+  JSON
+}
+
+enum CmsItemStatus {
+  DRAFT
+  PUBLISHED
+  SCHEDULED
+  ARCHIVED
+}
+
+enum SiteFormSubmissionStatus {
+  NEW
+  READ
+  REPLIED
+  SPAM
+  ARCHIVED
+}
+
+enum SiteEventType {
+  PAGE_VIEW
+  SESSION_START
+  FORM_SUBMIT
+  WHATSAPP_CLICK
+  CALL_CLICK
+  REVIEW_CLICK
+  CTA_CLICK
+  OUTBOUND_CLICK
+  APPOINTMENT_REQUEST
+}
+
+// =========================================================
+// SITE
+// =========================================================
+
+model Site {
+  id       String @id @default(cuid())
+  tenantId String
+  name     String
+  /// URL segment for the platform-hosted URL: /s/<slug>, and the left label of
+  /// the platform subdomain <slug>.SITES_ROOT_DOMAIN. Globally unique — a
+  /// subdomain is a DNS name, so two tenants can never share one, and the
+  /// public /s/<slug> lookup (which has no tenant context to disambiguate
+  /// with) requires the same guarantee.
+  slug     String @unique
+
+  status   SiteStatus @default(DRAFT)
+  industry String?
+
+  /// Optional link to a physical location, so sections like Map /
+  /// OpeningHours / Reviews can bind to real business data.
+  locationId String?
+
+  /// ThemeTokens — colors, typography, radii, spacing scale, dark mode.
+  /// Rendered into CSS custom properties, which is what makes
+  /// "change blue to green" a single-field update.
+  theme Json
+
+  /// AI context memory. Persisted so every later AI request is grounded
+  /// without the user restating it. See BrandContext in
+  /// src/site/document/types.ts.
+  brand Json?
+
+  /// Site-wide SEO defaults (title template, description, OG image,
+  /// robots, schema.org type). Pages override individual fields.
+  seo Json?
+
+  /// Feature toggles + integrations (analytics IDs, WhatsApp number,
+  /// GTM, Search Console verification, white-label flags).
+  settings Json?
+
+  logoUrl    String? @db.Text
+  faviconUrl String? @db.Text
+
+  publishedAt DateTime?
+  archivedAt  DateTime?
+  deletedAt   DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?
+
+  tenant      Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location    Location?            @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  pages       SitePage[]
+  revisions   SiteRevision[]
+  domains     SiteDomain[]
+  collections CmsCollection[]
+  forms       SiteForm[]
+  events      SiteEvent[]
+  aiThreads   SiteAiConversation[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, deletedAt])
+  @@index([locationId])
+}
+
+// =========================================================
+// SITE PAGE
+// =========================================================
+
+model SitePage {
+  id       String @id @default(cuid())
+  siteId   String
+  tenantId String
+
+  title String
+  /// Leading-slash route relative to the site root. Home is "/".
+  path  String @db.VarChar(300)
+
+  status SitePageStatus @default(DRAFT)
+  isHome Boolean        @default(false)
+
+  /// Editable draft node tree (SiteDocument).
+  document Json
+  /// Immutable snapshot served to the public. Null until first publish.
+  publishedDocument Json?
+
+  /// Per-page SEO overrides.
+  seo Json?
+
+  sortOrder Int @default(0)
+
+  /// Set when the page is excluded from nav/sitemap (e.g. landing pages).
+  hiddenInNav Boolean @default(false)
+  noIndex     Boolean @default(false)
+
+  publishedAt DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  /// `deletedAt` is part of the key on purpose. With a plain
+  /// @@unique([siteId, path]) a soft-deleted page keeps its path reserved
+  /// forever, so deleting /about and then re-adding /about would fail. MySQL
+  /// treats NULLs as distinct in a unique index, so this still allows only one
+  /// LIVE page per path (deletedAt = NULL) while permitting any number of
+  /// deleted ones. Queries that check availability must filter deletedAt: null.
+  @@unique([siteId, path, deletedAt])
+  @@index([tenantId])
+  @@index([siteId, status])
+  @@index([siteId, deletedAt])
+}
+
+// =========================================================
+// SITE REVISION — version history / rollback
+// =========================================================
+
+model SiteRevision {
+  id       String @id @default(cuid())
+  siteId   String
+  tenantId String
+  /// Null for site-wide snapshots (theme change, publish of all pages).
+  pageId   String?
+
+  kind  SiteRevisionKind
+  label String?          @db.VarChar(300)
+
+  /// Full SiteDocument (page revision) or { theme, pages[] } (site
+  /// revision). Restored verbatim on rollback.
+  snapshot Json
+
+  /// For AI_EDIT revisions: the prompt + operations that produced it,
+  /// so the change is auditable and explainable in the UI.
+  aiPrompt     String? @db.Text
+  aiOperations Json?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId, createdAt])
+  @@index([siteId, pageId, createdAt])
+  @@index([tenantId])
+}
+
+// =========================================================
+// SITE DOMAIN — custom domain + DNS + SSL
+// =========================================================
+
+model SiteDomain {
+  id       String @id @default(cuid())
+  siteId   String
+  tenantId String
+
+  /// Punycode-normalized, lowercased hostname. Globally unique: two
+  /// tenants cannot claim the same domain.
+  hostname  String  @unique @db.VarChar(255)
+  isPrimary Boolean @default(false)
+  /// When true, requests are 301'd to the primary domain.
+  redirectToPrimary Boolean @default(false)
+
+  status SiteDomainStatus @default(PENDING)
+
+  /// TXT value the tenant must publish to prove ownership.
+  verificationToken String    @db.VarChar(120)
+  verifiedAt        DateTime?
+
+  sslStatus    SiteSslStatus @default(NONE)
+  sslIssuedAt  DateTime?
+  sslExpiresAt DateTime?
+
+  /// The exact records the DNS wizard tells the user to create, plus the
+  /// last observed values, so the UI can diff expected vs actual.
+  dnsRecords    Json?
+  lastCheckedAt DateTime?
+  lastError     String?   @db.VarChar(500)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId, status])
+  @@index([tenantId])
+}
+
+// =========================================================
+// ACME CHALLENGE — HTTP-01 validation tokens
+//
+// Let's Encrypt fetches http://<domain>/.well-known/acme-challenge/<token>
+// and expects the key authorization back. Stored in the database rather than
+// in process memory for two reasons: the token must survive a deploy or
+// restart that lands mid-issuance, and behind more than one app instance the
+// CA's request can hit a different process than the one that created the
+// order.
+//
+// Not tenant-scoped: the route serving these is necessarily public (the CA
+// presents no credentials), and the token itself is the only secret involved.
+// Rows are short-lived and swept once expired.
+// =========================================================
+
+model AcmeChallenge {
+  id String @id @default(cuid())
+
+  /// The token from the ACME challenge, which forms the request path.
+  token String @unique @db.VarChar(255)
+  /// Body to return: "<token>.<base64url(thumbprint)>".
+  keyAuthorization String @db.Text
+
+  /// Hostname the order is for. Kept for auditing and cleanup, not matching —
+  /// the CA may resolve the challenge over any of the domain's addresses.
+  hostname String @db.VarChar(255)
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([hostname])
+  @@index([expiresAt])
+}
+
+// =========================================================
+// SITE TEMPLATE — industry starting points
+//
+// tenantId null = platform-provided global template.
+// =========================================================
+
+model SiteTemplate {
+  id       String  @id @default(cuid())
+  tenantId String?
+
+  name        String
+  slug        String  @unique
+  industry    String?
+  description String? @db.Text
+
+  thumbnailUrl String? @db.Text
+
+  /// { theme, pages: [{ title, path, document }] }
+  blueprint Json
+
+  isGlobal  Boolean @default(false)
+  isPremium Boolean @default(false)
+  sortOrder Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([industry])
+  @@index([tenantId])
+}
+
+// =========================================================
+// AI CONVERSATION — context memory for conversational editing
+// =========================================================
+
+model SiteAiConversation {
+  id       String @id @default(cuid())
+  siteId   String
+  tenantId String
+
+  title String? @db.VarChar(300)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  site     Site            @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  messages SiteAiMessage[]
+
+  @@index([siteId, updatedAt])
+  @@index([tenantId])
+}
+
+model SiteAiMessage {
+  id             String @id @default(cuid())
+  conversationId String
+  tenantId       String
+
+  role    SiteAiRole
+  content String     @db.Text
+
+  /// Structured operations the assistant applied, so the UI can show
+  /// "what changed" and offer a one-click revert.
+  operations Json?
+  /// Revision created by this message, for revert.
+  revisionId String?
+
+  /// Null when the reply came from the deterministic fallback planner
+  /// instead of the model.
+  model String? @db.VarChar(80)
+
+  createdAt DateTime @default(now())
+
+  conversation SiteAiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([tenantId])
+}
+
+// =========================================================
+// CMS
+// =========================================================
+
+model CmsCollection {
+  id       String @id @default(cuid())
+  siteId   String
+  tenantId String
+
+  name         String
+  /// Used in dynamic routes: /<slug>/<itemSlug>
+  slug         String
+  singularName String?
+  description  String? @db.Text
+
+  /// CmsField[] — see src/site/cms/types.ts. Schema-as-data keeps
+  /// tenant-defined collections possible without migrations.
+  fields Json
+
+  /// Page used to render a single item (dynamic template).
+  detailPageId String?
+
+  isSystem  Boolean @default(false)
+  sortOrder Int     @default(0)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  site  Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  items CmsItem[]
+
+  @@unique([siteId, slug])
+  @@index([tenantId])
+}
+
+model CmsItem {
+  id           String @id @default(cuid())
+  collectionId String
+  tenantId     String
+  siteId       String
+
+  slug  String @db.VarChar(300)
+  title String
+
+  /// Field values keyed by CmsField.key, validated against the parent
+  /// collection's field definitions at the service layer.
+  data Json
+
+  status CmsItemStatus @default(DRAFT)
+  seo    Json?
+
+  featuredImageUrl String? @db.Text
+  excerpt          String? @db.Text
+
+  /// Denormalized for cheap filtering/faceting without JSON queries.
+  categories Json?
+  tags       Json?
+
+  publishedAt DateTime?
+  scheduledAt DateTime?
+  deletedAt   DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  collection CmsCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, slug])
+  @@index([siteId, status])
+  @@index([collectionId, status, publishedAt])
+  @@index([tenantId])
+  @@index([scheduledAt])
+}
+
+// =========================================================
+// FORMS / LEAD CAPTURE
+// =========================================================
+
+model SiteForm {
+  id       String @id @default(cuid())
+  siteId   String
+  tenantId String
+
+  name String
+  slug String
+
+  /// SiteFormField[] — label, key, kind, required, validation.
+  fields Json
+
+  /// Where to send notifications. String[] of email addresses.
+  notifyEmails Json?
+
+  successMessage String? @db.Text
+  /// Redirect instead of showing an inline message.
+  redirectUrl    String? @db.VarChar(500)
+
+  /// Honeypot + rate limit are always on; this adds a shared secret for
+  /// hCaptcha/Turnstile when the tenant configures one.
+  spamProtection Json?
+
+  submissionCount Int @default(0)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  site        Site                 @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  submissions SiteFormSubmission[]
+
+  @@unique([siteId, slug])
+  @@index([tenantId])
+}
+
+model SiteFormSubmission {
+  id       String @id @default(cuid())
+  formId   String
+  tenantId String
+  siteId   String
+
+  /// Submitted values keyed by field key.
+  data Json
+
+  /// Extracted for list views + dedupe without touching the JSON.
+  name  String?
+  email String?
+  phone String?
+
+  status SiteFormSubmissionStatus @default(NEW)
+
+  pagePath  String? @db.VarChar(300)
+  referrer  String? @db.VarChar(500)
+  ipAddress String? @db.VarChar(64)
+  userAgent String? @db.Text
+  /// 0..1 — heuristic score from the spam checks.
+  spamScore Float?
+
+  createdAt DateTime @default(now())
+  readAt    DateTime?
+
+  form SiteForm @relation(fields: [formId], references: [id], onDelete: Cascade)
+
+  @@index([formId, createdAt])
+  @@index([siteId, status])
+  @@index([tenantId])
+  @@index([email])
+}
+
+// =========================================================
+// SITE ANALYTICS
+//
+// Append-only event log. Aggregations are computed with grouped
+// queries; a rollup table can be added later without changing writes.
+// =========================================================
+
+model SiteEvent {
+  id       String @id @default(cuid())
+  siteId   String
+  tenantId String
+
+  type SiteEventType
+  path String?       @db.VarChar(300)
+
+  /// Anonymous first-party visitor + session identifiers (cookieless
+  /// hash). Never PII.
+  visitorId String? @db.VarChar(64)
+  sessionId String? @db.VarChar(64)
+
+  referrer String? @db.VarChar(500)
+  source   String? @db.VarChar(120)
+  device   String? @db.VarChar(40)
+  country  String? @db.Char(2)
+
+  meta Json?
+
+  createdAt DateTime @default(now())
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId, type, createdAt])
+  @@index([siteId, createdAt])
+  @@index([siteId, sessionId])
+  @@index([tenantId])
+}

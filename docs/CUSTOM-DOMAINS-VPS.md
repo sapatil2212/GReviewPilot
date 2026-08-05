@@ -65,6 +65,29 @@ http {
 }
 ```
 
+### 2b. Dedicated vhost directory (keep generated configs away from manual ones)
+
+Point `NGINX_VHOST_PATH` at a directory used *only* for generated tenant configs,
+separate from `sites-enabled`. Generated files are overwritten and deleted
+automatically, so mixing them with hand-maintained vhosts risks losing one.
+
+```bash
+sudo mkdir -p /etc/nginx/greviewpilot-sites
+sudo chown root:www-data /etc/nginx/greviewpilot-sites
+sudo chmod 775 /etc/nginx/greviewpilot-sites
+```
+
+Include it inside `http { }` in `/etc/nginx/nginx.conf`:
+
+```nginx
+include /etc/nginx/greviewpilot-sites/*;
+```
+
+A wildcard that matches nothing is valid in nginx, so this is safe before the
+first domain is provisioned. Generated filenames are prefixed
+`greviewpilot-<hostname>.conf`, and the app only ever touches files matching that
+prefix in this directory.
+
 ### 3. Default server block (reject unknown hostnames)
 
 Without this, any domain pointed at your IP gets served *some* tenant's site —
@@ -137,12 +160,38 @@ sudo chmod 775 /etc/nginx/sites-enabled
 
 ### 5. Firewall
 
+If `ufw status` reports `inactive`, nothing is needed — both ports are already
+reachable unless the hosting provider blocks them. If it is active:
+
 ```bash
 sudo ufw allow 80
 sudo ufw allow 443
 ```
 
-Port 80 must stay open permanently. Closing it after setup breaks renewals.
+**Port 80 must stay open permanently.** It is not only for the first certificate:
+every renewal revalidates over plain HTTP. Closing it after setup produces a
+working site that silently stops renewing.
+
+### 6. Running under PM2
+
+The reload helper is authorised for a specific user in sudoers, so the app must
+run as that user. Check which one:
+
+```bash
+pm2 describe greviewpilot | grep -i user
+```
+
+If PM2 runs as `root`, the `www-data` sudoers entry is irrelevant (root needs no
+authorisation) but every certificate and vhost the app writes will be root-owned,
+and nginx workers may not be able to read them. Running as `www-data` is the
+configuration these instructions assume:
+
+```bash
+sudo -u www-data pm2 start npm --name greviewpilot -- start
+```
+
+`npm run doctor` reports the effective writability rather than the user, which is
+the thing that actually matters.
 
 ---
 
@@ -153,8 +202,16 @@ In `.env` on the VPS:
 ```bash
 APP_URL="https://app.yourdomain.com"
 
-# Your VPS public IP — tenants point A records at this.
+# Where the Node process listens. Must be set explicitly — see the note below.
+APP_UPSTREAM="127.0.0.1:3000"
+
+# Your VPS public IP — tenants point root-domain A records at this.
 SITE_APEX_IP="203.0.113.10"
+# Bare hostname tenants point subdomain CNAMEs at. No scheme, no port.
+# Leave blank and it falls back to APP_URL's hostname — which yields
+# "localhost" in development and tells tenants to point their domain at
+# localhost. Always set it explicitly in production.
+SITE_CNAME_TARGET="app.yourdomain.com"
 
 SSL_PROVISIONING="nginx"
 ACME_DIRECTORY="staging"          # switch to production after a successful run
@@ -174,9 +231,46 @@ allows about 5 certificates per domain per week; burning that while wiring thing
 up locks that domain out of HTTPS for days with no appeal. Staging certificates
 are real but untrusted — enough to prove the pipeline works.
 
+**`APP_UPSTREAM` must be set and must not be 80 or 443.** It is the local address
+nginx forwards tenant traffic to. It cannot be derived from `APP_URL`: behind
+nginx, `APP_URL` is nginx's own public address, so inferring the upstream from
+`https://app.yourdomain.com` yields port 443 and every tenant vhost ends up
+proxying plain HTTP into nginx's TLS listener. Env validation rejects those ports
+rather than letting the loop reach a config file.
+
+`CRON_SECRET` must be a real generated value. The cron routes are enabled the
+moment it is non-empty, so a placeholder means anyone who guesses it can trigger
+the jobs:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+### Platform host vs. tenant hosts
+
+Middleware treats the hostname in `APP_URL` (and its subdomains) as the platform,
+and **every other hostname as a tenant domain**. With
+`APP_URL="https://app.yourdomain.com"`, the apex `yourdomain.com` and
+`www.yourdomain.com` are *not* platform hosts — a request to either is routed as a
+custom domain and 404s unless a tenant owns it.
+
+If you serve a marketing site at the apex, it must either be a separate nginx
+vhost that never reaches this app, or the apex must be registered as a real
+`SiteDomain`. `npm run doctor` prints this warning with your actual hostnames.
+
 ---
 
 ## Renewal job
+
+The hourly job does four things, and the flow does not complete without it:
+
+1. **Re-verifies DNS** for every domain not yet `CONNECTED`. DNS propagation
+   routinely outlasts a tenant's patience — they add the records, press Verify,
+   see "not found yet", and leave. Without this the domain would sit in `PENDING`
+   forever even after the records went live.
+2. **Issues certificates** for domains that just became connected.
+3. **Renews** anything within 30 days of expiry.
+4. Inspects live certificates, flags problems, and sweeps expired challenge rows.
 
 Certificates last 90 days and are replaced at 30 days remaining. Nothing renews
 unless this runs.
@@ -201,6 +295,12 @@ Do this once, in order. Each step fails loudly rather than silently producing a
 broken certificate.
 
 ```bash
+# 0. Preflight. Tests the things that actually break: directory writability by
+#    the app user, the sudo reload helper, `nginx -t` over the live config, the
+#    include glob, the $connection_upgrade map, database reachability, and whether
+#    the app is listening on APP_UPSTREAM. Fix every failure before continuing.
+npm run doctor
+
 # 1. Confirm configuration is what you think it is.
 npm run ssl:provision -- --check
 
@@ -234,16 +334,63 @@ Verify triggers issuance automatically once DNS resolves.
 
 ---
 
-## Tenant-facing DNS
+## What the tenant does
 
-The dashboard shows these. Apex and subdomain differ because CNAME at a zone apex
-is invalid DNS.
+**One DNS record.** That is the whole job.
 
-| Domain type | Record | Name | Value |
+| Their domain | Record | Name / Host | Value |
 |---|---|---|---|
-| `clinic.com` | A | `@` | your `SITE_APEX_IP` |
-| `www.clinic.com` | CNAME | `www` | your app hostname |
-| both | TXT | `_greviewpilot` | verification token from the dashboard |
+| `clinic.com` (root) | A | `@` | your `SITE_APEX_IP` |
+| `www.clinic.com` (subdomain) | CNAME | `www` | your `SITE_CNAME_TARGET` |
+
+Root domains need an A record because a CNAME at a zone apex is invalid DNS.
+Everything else takes a CNAME.
+
+They add it at whichever registrar holds the domain — GoDaddy, Hostinger,
+Namecheap, Cloudflare — and that is it. No TXT record, no waiting on the page, no
+support ticket. The dashboard rechecks every minute while open, and the hourly job
+keeps checking after they close it. When the record resolves, the domain verifies,
+a certificate is issued, and nginx is reconfigured without anyone touching
+anything.
+
+Adding a root domain also offers the `www` counterpart (checked by default),
+created as a separate domain that redirects to the root. Separate rather than both
+names on one certificate because the tenant may point one before the other, and an
+ACME order naming a hostname that does not yet resolve fails *entirely* rather
+than partially. Each gets its own certificate; `www` terminates TLS and redirects
+at the edge.
+
+### Why there is no mandatory TXT record
+
+Requiring a TXT verification record on top of the routing record used to be
+mandatory here. It bought nothing: **only whoever controls the DNS zone can make a
+hostname resolve to your server**, so a matching routing record already proves
+control. The second record just meant every tenant did twice the work and some
+domains sat unverified with perfectly good routing because the TXT was missing or
+mistyped.
+
+The TXT record still exists, marked optional in the UI, for one real case:
+verifying ownership *before* moving live traffic. A business whose site is already
+serving customers can add the TXT, see the domain verified, and only then switch
+the routing record — no window where the domain points at an unprovisioned server.
+
+### Two ways routing is proven
+
+Verification accepts **either**:
+
+1. The routing record resolves to us (`A` = `SITE_APEX_IP`, or the `CNAME` target).
+2. `http://<domain>/.well-known/greviewpilot-domain-check` returns that domain's
+   verification token.
+
+The second exists because comparing addresses only works when traffic comes
+straight to your IP. A tenant behind Cloudflare, a load balancer, or a registrar
+that flattens CNAMEs resolves to somebody else's address, so the record check
+reports "not pointing here" for a domain that works fine. The HTTP probe is the
+stronger signal in general — it confirms traffic actually arrives rather than that
+a record looks right.
+
+A domain showing a mismatched `A` record but `CONNECTED` status is therefore
+normal and correct, not a bug.
 
 ---
 
@@ -296,7 +443,35 @@ detects the proxy: the A record won't match `SITE_APEX_IP`.
 
 | Command | Covers |
 |---|---|
-| `npm run verify:nginx` | vhost generation, config-injection rejection, ACME path preserved on port 80 |
+| `npm run doctor` | directory writability, sudo reload helper, live `nginx -t`, include glob, `$connection_upgrade` map, DB, upstream, unused env vars |
+| `npm run verify:nginx` | vhost generation, config-injection rejection, ACME path preserved on port 80, upstream not pointing at nginx |
 | `npm run verify:nginx:syntax` | brace/terminator structure, and real `nginx -t` when available |
 | `npm run verify:tls` | certificate inspection against valid/expired/mismatched/self-signed hosts, CAA logic |
 | `npm run smoke:domain` | custom-domain routing, canonical redirects, SSL reconciliation, cron auth |
+
+---
+
+## Storage paths that are set but unused
+
+If your `.env` carries `AVATARS_PATH`, `BUSINESS_LOGOS_PATH`, `REVIEW_IMAGES_PATH`,
+`QR_CODES_PATH`, `EXPORTS_PATH`, `IMPORTS_PATH`, `REPORTS_PATH`, `TEMP_PATH` or
+`AI_CACHE_PATH`, **nothing reads them.** They are harmless but misleading.
+
+Media goes through one root, `STORAGE_LOCAL_PATH`, with the storage layer
+namespacing every object automatically:
+
+```
+<STORAGE_LOCAL_PATH>/tenants/<tenantId>/<category>/<yyyymm>/<sha256>-<nonce>.<ext>
+```
+
+Website-builder uploads are the one exception, routed to `WEBSITE_MEDIA_PATH` so a
+tenant's site assets can be backed up independently of their media library.
+Exports, reports and AI results are generated in memory or stored in the database
+and never touch disk.
+
+`DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` are also unused —
+`DATABASE_URL` carries all of them, and having both invites them to drift apart.
+`npm run doctor` lists whichever of these it finds.
+
+If you would rather each category had its own directory, that is a change to the
+storage layer, not just configuration — say so and it can be wired up.

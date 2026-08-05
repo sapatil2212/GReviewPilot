@@ -41,6 +41,21 @@ export function provisioningEnabled(): boolean {
 }
 
 /**
+ * In-flight issuance, keyed by hostname.
+ *
+ * Two things can ask for the same certificate at once: a tenant pressing Verify
+ * while the hourly sweep is running, or an impatient double-click. Without this,
+ * both submit an ACME order and both count against Let's Encrypt's per-domain
+ * weekly limit — five of which locks the domain out of HTTPS for a week. Callers
+ * join the existing attempt instead of starting a second one.
+ *
+ * Process-local, which is sufficient here: a second app instance would need a
+ * database lock, but the CA's own duplicate-order handling makes that a
+ * rate-limit inefficiency rather than a correctness problem.
+ */
+const inFlight = new Map<string, Promise<ProvisionResult>>();
+
+/**
  * Days before expiry at which we replace a certificate.
  *
  * Let's Encrypt certificates last 90 days and their own advice is to renew at
@@ -62,6 +77,23 @@ function daysUntil(date: Date): number {
  * reissued, which is what keeps us inside the CA's rate limits.
  */
 export async function provisionCertificate(
+  domain: SiteDomain,
+  options: { force?: boolean } = {},
+): Promise<ProvisionResult> {
+  const existingAttempt = inFlight.get(domain.hostname);
+  if (existingAttempt) {
+    logger.debug("Joining in-flight provisioning", { hostname: domain.hostname });
+    return existingAttempt;
+  }
+
+  const attempt = provisionCertificateUncoordinated(domain, options).finally(() => {
+    inFlight.delete(domain.hostname);
+  });
+  inFlight.set(domain.hostname, attempt);
+  return attempt;
+}
+
+async function provisionCertificateUncoordinated(
   domain: SiteDomain,
   options: { force?: boolean } = {},
 ): Promise<ProvisionResult> {

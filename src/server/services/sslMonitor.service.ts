@@ -16,7 +16,7 @@
 import { SiteDomainStatus, SiteSslStatus, AuditAction } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { auditRepository } from "@/server/repositories/audit.repository";
-import { reconcileCertificate } from "@/server/services/siteDomain.service";
+import { reconcileCertificate, reverifyDomain } from "@/server/services/siteDomain.service";
 import { RENEWAL_WARNING_DAYS } from "@/server/services/tlsCertificate.service";
 import {
   provisionCertificate,
@@ -32,6 +32,8 @@ export interface SslMonitorReport {
   renewalDue: number;
   /** Certificates actually issued or replaced during this run. */
   renewed: number;
+  /** Domains that became CONNECTED during this run without user action. */
+  verified: number;
   expired: number;
   failed: number;
   pending: number;
@@ -63,8 +65,18 @@ export async function runSslMonitor(
 
   const domains = await prisma.siteDomain.findMany({
     where: {
-      // REMOVED domains keep their row for audit history but must not be probed.
-      status: { in: [SiteDomainStatus.CONNECTED, SiteDomainStatus.VERIFYING] },
+      // PENDING is included deliberately. Verification used to run only when a
+      // user pressed the button, and DNS propagation routinely outlasts their
+      // patience — they set the records, get "not found yet", and leave. Nothing
+      // then advanced the domain, so a correctly-configured one could sit in
+      // PENDING forever. REMOVED rows are kept for audit history and never probed.
+      status: {
+        in: [
+          SiteDomainStatus.CONNECTED,
+          SiteDomainStatus.VERIFYING,
+          SiteDomainStatus.PENDING,
+        ],
+      },
       ...(options.siteId ? { siteId: options.siteId } : {}),
       ...(options.hostname ? { hostname: options.hostname } : {}),
     },
@@ -76,6 +88,7 @@ export async function runSslMonitor(
     active: 0,
     renewalDue: 0,
     renewed: 0,
+    verified: 0,
     expired: 0,
     failed: 0,
     pending: 0,
@@ -94,12 +107,37 @@ export async function runSslMonitor(
     await Promise.all(
       batch.map(async (domain) => {
         try {
+          // Re-run DNS verification for anything not yet connected, so a domain
+          // whose records went live after the user gave up completes on its own.
+          let current = domain;
+          if (domain.status !== SiteDomainStatus.CONNECTED) {
+            const evaluation = await reverifyDomain(domain).catch((err) => {
+              logger.warn("Re-verification failed", {
+                hostname: domain.hostname,
+                err: err instanceof Error ? err.message : String(err),
+              });
+              return null;
+            });
+            if (evaluation?.connected) {
+              report.verified += 1;
+              // Provisioning below keys off status, so reflect the new one.
+              current = { ...domain, status: SiteDomainStatus.CONNECTED };
+            } else {
+              // Still not routable — nothing to inspect or issue yet. Counting it
+              // as pending rather than probing TLS avoids a pointless handshake
+              // against a host that does not resolve to us.
+              report.pending += 1;
+              report.checked += 1;
+              return;
+            }
+          }
+
           // Self-hosted: attempt renewal before inspecting, so the report
           // reflects the certificate that will actually be serving traffic.
           // provisionCertificate is idempotent and reuses anything with more
           // than 30 days left, so this is cheap on most runs.
-          if (provisioningEnabled() && domain.status === SiteDomainStatus.CONNECTED) {
-            const result = await provisionCertificate(domain).catch((err) => {
+          if (provisioningEnabled() && current.status === SiteDomainStatus.CONNECTED) {
+            const result = await provisionCertificate(current).catch((err) => {
               logger.error("Renewal attempt failed", {
                 hostname: domain.hostname,
                 err: err instanceof Error ? err.message : String(err),
@@ -207,6 +245,7 @@ export async function runSslMonitor(
     active: report.active,
     renewalDue: report.renewalDue,
     renewed: report.renewed,
+    verified: report.verified,
     expired: report.expired,
     failed: report.failed,
     errors: report.errors,

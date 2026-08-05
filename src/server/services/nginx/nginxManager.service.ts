@@ -27,17 +27,17 @@ export class NginxError extends Error {
   }
 }
 
-/** Where the Next.js app listens, derived from APP_URL. */
+/**
+ * Where nginx sends tenant traffic.
+ *
+ * Read from configuration rather than derived from APP_URL. An earlier version
+ * inferred it from APP_URL, which works in development (where the public URL and
+ * the listen address are the same) and breaks in production: `https://app.example.com`
+ * has no explicit port, so it resolved to 443 and every generated vhost proxied
+ * plain HTTP into nginx's own TLS listener.
+ */
 function upstream(): string {
-  try {
-    const url = new URL(env.APP_URL);
-    const port = url.port || (url.protocol === "https:" ? "443" : "80");
-    // Always loopback: nginx and the app are on the same host, and proxying via
-    // a public hostname would leave the box and come back through nginx again.
-    return `127.0.0.1:${port}`;
-  } catch {
-    return "127.0.0.1:3000";
-  }
+  return env.APP_UPSTREAM;
 }
 
 /**

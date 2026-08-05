@@ -344,8 +344,10 @@ try {
   );
 
   console.log("\nSSL monitor job");
-  const { runSslMonitor } = await import("../src/server/services/sslMonitor.service");
-  const report = await runSslMonitor({ hostname: primaryHost });
+  const { runSslMonitor: runSslMonitorFn } = await import(
+    "../src/server/services/sslMonitor.service"
+  );
+  const report = await runSslMonitorFn({ hostname: primaryHost });
   check("monitor checked the domain", report.checked === 1, String(report.checked));
   check("monitor completed without per-domain errors", report.errors === 0, String(report.errors));
   check(
@@ -360,6 +362,248 @@ try {
     "rejects a call with no cron credentials",
     unauth.status === 401 || unauth.status === 503,
     String(unauth.status),
+  );
+
+  // -------------------------------------------------------------------
+  // Routing proof via HTTP, for tenants behind a proxy whose address can
+  // never equal SITE_APEX_IP.
+  // -------------------------------------------------------------------
+  console.log("\nRouting proof endpoint");
+  await prisma.siteDomain.update({
+    where: { id: primary.id },
+    data: { status: SiteDomainStatus.CONNECTED },
+  });
+  const proofRow = await prisma.siteDomain.findUniqueOrThrow({ where: { id: primary.id } });
+
+  const proof = await get("/.well-known/greviewpilot-domain-check", primaryHost);
+  check(
+    "returns the domain's verification token for its own Host",
+    proof.status === 200 && proof.body.trim() === proofRow.verificationToken,
+    `status=${proof.status} body=${proof.body.trim().slice(0, 40)}`,
+  );
+
+  const proofUnknown = await get("/.well-known/greviewpilot-domain-check", "not-our-domain.example");
+  check("404s for a hostname we have no record of", proofUnknown.status === 404, String(proofUnknown.status));
+
+  // The platform's own host must not leak a token either.
+  const proofPlatform = await get("/.well-known/greviewpilot-domain-check");
+  check("404s on the platform host", proofPlatform.status === 404, String(proofPlatform.status));
+
+  // -------------------------------------------------------------------
+  // Automatic re-verification. Previously nothing advanced a domain unless a
+  // user pressed Verify, so DNS that went live later was never noticed.
+  // -------------------------------------------------------------------
+  console.log("\nAutomatic re-verification");
+  const { evaluateDomain, reverifyDomain } = await import(
+    "../src/server/services/siteDomain.service"
+  );
+
+  await prisma.siteDomain.update({
+    where: { id: primary.id },
+    data: { status: SiteDomainStatus.PENDING, verifiedAt: null, lastError: null },
+  });
+  const pendingRow = await prisma.siteDomain.findUniqueOrThrow({ where: { id: primary.id } });
+
+  // *.example resolves nowhere, so neither proof can succeed. The domain must
+  // stay pending with an explanation rather than being marked connected or failed.
+  const evaluation = await evaluateDomain(pendingRow);
+  check(
+    "an unresolvable domain is not considered connected",
+    evaluation.connected === false,
+    JSON.stringify({ routingOk: evaluation.routingOk, ownershipOk: evaluation.ownershipOk }),
+  );
+  check(
+    "neither DNS nor the HTTP probe reports success",
+    evaluation.recordMatches === false && evaluation.reachability.reached === false,
+  );
+  check("a reason is produced for the tenant", Boolean(evaluation.lastError), evaluation.lastError ?? "");
+
+  const reverified = await reverifyDomain(pendingRow);
+  const afterReverify = await prisma.siteDomain.findUniqueOrThrow({ where: { id: primary.id } });
+  check(
+    "re-verification persists the outcome without a user session",
+    afterReverify.lastCheckedAt !== null && afterReverify.status === reverified.status,
+    `status=${afterReverify.status}`,
+  );
+  check(
+    "an unresolvable domain is not silently marked verified",
+    afterReverify.verifiedAt === null,
+  );
+
+  // The sweep must pick up PENDING domains at all — the gap that made the whole
+  // flow depend on a user clicking a button.
+  const sweep = await runSslMonitorFn({ hostname: primaryHost });
+  check(
+    "the scheduled sweep processes PENDING domains",
+    sweep.checked === 1,
+    `checked=${sweep.checked}`,
+  );
+  check(
+    "an unresolvable PENDING domain counts as pending, not failed",
+    sweep.pending === 1 && sweep.failed === 0,
+    `pending=${sweep.pending} failed=${sweep.failed}`,
+  );
+
+  // -------------------------------------------------------------------
+  // Concurrent provisioning must not start two ACME orders.
+  // -------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // DNS instructions handed to the tenant. These are the values a customer
+  // types into GoDaddy/Hostinger, so a wrong one is invisible here and breaks
+  // every domain.
+  // -------------------------------------------------------------------
+  console.log("\nDNS instructions");
+  const { buildDnsRecords } = await import("../src/server/services/siteDomain.service");
+
+  const apexRecords = buildDnsRecords({
+    hostname: "restaurant.in",
+    verificationToken: "greviewpilot-verify=test",
+  } as never);
+  const subRecords = buildDnsRecords({
+    hostname: "www.restaurant.in",
+    verificationToken: "greviewpilot-verify=test",
+  } as never);
+
+  const apexRouting = apexRecords.find((r) => r.purpose === "routing");
+  const subRouting = subRecords.find((r) => r.purpose === "routing");
+
+  check("apex gets an A record at @", apexRouting?.type === "A" && apexRouting?.name === "@");
+  check("subdomain gets a CNAME at the leftmost label", subRouting?.type === "CNAME" && subRouting?.name === "www");
+
+  // A CNAME value is a bare DNS name. This previously rendered "localhost:3000"
+  // because the platform host was read with .host instead of .hostname.
+  check(
+    "CNAME value has no port",
+    !subRouting?.value.includes(":"),
+    subRouting?.value,
+  );
+  check(
+    "CNAME value is not an IP address",
+    !/^\d{1,3}(\.\d{1,3}){3}$/.test(subRouting?.value ?? ""),
+    subRouting?.value,
+  );
+  check(
+    "A record value is an IP address",
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(apexRouting?.value ?? ""),
+    apexRouting?.value,
+  );
+
+  // Exactly one record must be mandatory: pointing it at us already proves zone
+  // control, so demanding a TXT as well was a step that bought nothing.
+  check(
+    "apex requires exactly one record",
+    apexRecords.filter((r) => !r.optional).length === 1,
+    String(apexRecords.filter((r) => !r.optional).length),
+  );
+  check(
+    "subdomain requires exactly one record",
+    subRecords.filter((r) => !r.optional).length === 1,
+    String(subRecords.filter((r) => !r.optional).length),
+  );
+  check(
+    "the TXT record is marked optional",
+    apexRecords.find((r) => r.purpose === "verification")?.optional === true,
+  );
+
+  // -------------------------------------------------------------------
+  // Observations must survive a reload, or the table reads "Not checked"
+  // immediately after a check that did run.
+  // -------------------------------------------------------------------
+  console.log("\nCheck results persist");
+  // Imported here and reused by the www-alias section below. Declaring it there
+  // instead put this reference in the temporal dead zone of the same scope.
+  const { siteDomainService } = await import("../src/server/services/siteDomain.service");
+  const listed = await siteDomainService.list(ctx, site.id);
+  const listedPrimary = listed.find((d) => d.hostname === primaryHost);
+  check("domain is listed", Boolean(listedPrimary));
+  const listedRouting = listedPrimary?.dnsRecords.find((r) => r.purpose === "routing");
+  check(
+    "a previously-checked record reports a matched verdict, not null",
+    listedRouting !== undefined && listedRouting.matched !== null,
+    `matched=${String(listedRouting?.matched)}`,
+  );
+  check(
+    "observed values are carried through",
+    Array.isArray(listedRouting?.found),
+    JSON.stringify(listedRouting?.found),
+  );
+
+  // -------------------------------------------------------------------
+  // www alias created alongside an apex domain.
+  // -------------------------------------------------------------------
+  console.log("\nwww alias");
+  const aliasApex = `alias-${suffix}.example`;
+
+  const added = await siteDomainService.add(ctx, site.id, {
+    hostname: aliasApex,
+    isPrimary: false,
+    redirectToPrimary: false,
+    addWwwAlias: true,
+  });
+  check("apex domain created", added.hostname === aliasApex, added.hostname);
+  check("www alias reported back", added.alias?.hostname === `www.${aliasApex}`, String(added.alias?.hostname));
+
+  const wwwAliasRow = await prisma.siteDomain.findUnique({
+    where: { hostname: `www.${aliasApex}` },
+  });
+  check("alias row exists", wwwAliasRow !== null);
+  check("alias redirects to the primary", wwwAliasRow?.redirectToPrimary === true);
+  check("alias is not itself primary", wwwAliasRow?.isPrimary === false);
+  check(
+    "alias gets its own verification token",
+    Boolean(wwwAliasRow?.verificationToken) &&
+      wwwAliasRow?.verificationToken !== added.verificationToken,
+  );
+  // A www hostname must not spawn www.www.
+  const noDouble = await siteDomainService.add(ctx, site.id, {
+    hostname: `www2.${suffix}.example`,
+    isPrimary: false,
+    redirectToPrimary: false,
+    addWwwAlias: true,
+  });
+  check("alias created for a non-www subdomain too", noDouble.alias !== null);
+  const wwwInput = await siteDomainService.add(ctx, site.id, {
+    hostname: `www.direct-${suffix}.example`,
+    isPrimary: false,
+    redirectToPrimary: false,
+    addWwwAlias: true,
+  });
+  check(
+    "a www.* hostname does not get a www.www.* alias",
+    wwwInput.alias === null,
+    String(wwwInput.alias),
+  );
+
+  // The generated vhost for the alias must redirect rather than proxy.
+  const { nginxManager } = await import("../src/server/services/nginx/nginxManager.service");
+  const aliasVhost = nginxManager.preview({
+    hostname: `www.${aliasApex}`,
+    certPath: "/tmp/fullchain.pem",
+    keyPath: "/tmp/privkey.pem",
+    redirectTo: aliasApex,
+  });
+  check(
+    "alias vhost redirects to the apex",
+    aliasVhost.includes(`return 308 https://${aliasApex}$request_uri;`),
+  );
+
+  console.log("\nProvisioning concurrency");
+  const { provisionCertificate, provisioningEnabled } = await import(
+    "../src/server/services/sslProvisioning.service"
+  );
+  const [a, b] = await Promise.all([
+    provisionCertificate(afterReverify),
+    provisionCertificate(afterReverify),
+  ]);
+  check(
+    "two simultaneous requests produce one identical result",
+    a.action === b.action && a.reason === b.reason,
+    `${a.action} / ${b.action}`,
+  );
+  check(
+    "provisioning is skipped when disabled or DNS is unverified",
+    a.action === "skipped",
+    `${a.action}: ${a.reason} (provisioning ${provisioningEnabled() ? "on" : "off"})`,
   );
 } finally {
   await prisma.tenant.delete({ where: { id: tenant.id } }).catch((err) => {

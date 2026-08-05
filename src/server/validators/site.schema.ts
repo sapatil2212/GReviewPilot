@@ -557,6 +557,19 @@ export const addDomainSchema = z.object({
     .refine((v) => !/^\d+\.\d+\.\d+\.\d+$/.test(v), { message: "IP addresses are not supported" }),
   isPrimary: z.boolean().default(false),
   redirectToPrimary: z.boolean().default(false),
+  /**
+   * Also create the `www.` counterpart, redirecting to this one.
+   *
+   * Visitors type both forms and other sites link to both, so a domain that
+   * serves only one of them looks broken. Adding the alias as its own SiteDomain
+   * (rather than bundling both names into one certificate) keeps each hostname
+   * independently verifiable — the tenant may point one before the other, and a
+   * certificate request naming a hostname that does not yet resolve fails
+   * entirely rather than partially.
+   *
+   * Ignored for hostnames that already start with `www.`.
+   */
+  addWwwAlias: z.boolean().default(false),
 });
 
 export const updateDomainSchema = z

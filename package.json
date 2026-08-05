@@ -21,6 +21,7 @@
     "verify:nginx": "tsx scripts/verify-nginx.mts",
     "verify:nginx:syntax": "tsx scripts/verify-nginx-syntax.mts",
     "ssl:provision": "tsx scripts/ssl-provision.mts",
+    "doctor": "tsx scripts/deploy-doctor.mts",
     "smoke:builder": "tsx scripts/smoke-builder.mts",
     "smoke:domain": "tsx scripts/smoke-domain.mts",
     "smoke:subdomain": "tsx scripts/smoke-subdomain.mts",

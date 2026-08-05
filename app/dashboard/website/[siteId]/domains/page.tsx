@@ -10,7 +10,7 @@
  * specific record is still missing rather than just "failed".
  */
 
-import { use, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
@@ -46,6 +46,7 @@ import { cn } from "@/lib/utils";
 export default function DomainsPage({ params }: { params: Promise<{ siteId: string }> }) {
   const { siteId } = use(params);
   const [hostname, setHostname] = useState("");
+  const [addWwwAlias, setAddWwwAlias] = useState(true);
   const [adding, setAdding] = useState(false);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, DomainVerifyResultDto>>({});
@@ -61,11 +62,16 @@ export default function DomainsPage({ params }: { params: Promise<{ siteId: stri
     if (!hostname.trim()) return;
     setAdding(true);
     try {
-      await siteApi.addDomain(siteId, { hostname: hostname.trim() });
+      const created = await siteApi.addDomain(siteId, {
+        hostname: hostname.trim(),
+        addWwwAlias: addWwwAlias && !hostname.trim().toLowerCase().startsWith("www."),
+      });
       setHostname("");
       await refresh();
-      toast.success("Domain added", {
-        description: "Create the DNS records below, then press Verify.",
+      toast.success(created.alias ? "Domain and www alias added" : "Domain added", {
+        description: created.alias
+          ? `Create the DNS records for both ${created.hostname} and ${created.alias.hostname}, then press Verify.`
+          : "Create the DNS records below, then press Verify.",
       });
     } catch (err) {
       toast.error(err instanceof ApiClientError ? err.message : "Could not add the domain");
@@ -74,20 +80,77 @@ export default function DomainsPage({ params }: { params: Promise<{ siteId: stri
     }
   };
 
-  const verify = async (domainId: string) => {
-    setVerifying(domainId);
-    try {
-      const result = await siteApi.verifyDomain(siteId, domainId);
-      setResults((prev) => ({ ...prev, [domainId]: result }));
-      await refresh();
-      if (result.connected) toast.success("Domain verified and connected");
-      else toast.info("Not verified yet", { description: result.lastError ?? undefined });
-    } catch (err) {
-      toast.error(err instanceof ApiClientError ? err.message : "Verification failed");
-    } finally {
-      setVerifying(null);
-    }
-  };
+  const verify = useCallback(
+    async (domainId: string, options: { silent?: boolean } = {}) => {
+      if (!options.silent) setVerifying(domainId);
+      try {
+        const result = await siteApi.verifyDomain(siteId, domainId);
+        setResults((prev) => ({ ...prev, [domainId]: result }));
+        await refresh();
+        if (options.silent) {
+          // Background poll: only speak up on success, so a page left open does
+          // not emit a toast every minute while DNS propagates.
+          if (result.connected) toast.success("Domain verified and connected");
+          return result;
+        }
+        if (result.connected) toast.success("Domain verified and connected");
+        else toast.info("Not verified yet", { description: result.lastError ?? undefined });
+        return result;
+      } catch (err) {
+        // Silent polls swallow errors — a transient failure must not interrupt
+        // someone who is not even looking at this tab.
+        if (!options.silent) {
+          toast.error(err instanceof ApiClientError ? err.message : "Verification failed");
+        }
+        return null;
+      } finally {
+        if (!options.silent) setVerifying(null);
+      }
+    },
+    [siteId, refresh],
+  );
+
+  /**
+   * Re-check propagating domains on a timer.
+   *
+   * DNS takes minutes to hours, and the alternative is a tenant sitting on this
+   * page pressing Verify. The interval is 60s rather than something snappier
+   * because each attempt performs live DNS lookups and the endpoint allows 20 per
+   * 10 minutes per domain — faster polling would rate-limit the manual button.
+   *
+   * Gives up after 20 minutes so a tab left open overnight is not querying
+   * public resolvers indefinitely; the hourly job continues regardless, which is
+   * what actually guarantees the domain completes.
+   */
+  useEffect(() => {
+    const propagating = domains.filter(
+      (d) => d.status === "PENDING" || d.status === "VERIFYING",
+    );
+    if (propagating.length === 0) return;
+
+    let elapsed = 0;
+    const intervalMs = 60_000;
+    const giveUpAfterMs = 20 * 60_000;
+
+    const timer = setInterval(() => {
+      elapsed += intervalMs;
+      if (elapsed > giveUpAfterMs) {
+        clearInterval(timer);
+        return;
+      }
+      // Sequential, not parallel: several domains verifying at once would fire
+      // simultaneous resolver queries for no benefit.
+      void (async () => {
+        for (const domain of propagating) {
+          await verify(domain.id, { silent: true });
+        }
+      })();
+    }, intervalMs);
+
+    return () => clearInterval(timer);
+    // Keyed on the set of propagating domains so the timer restarts when one
+    // connects and stops once none remain.
+  }, [domains.map((d) => `${d.id}:${d.status}`).join(","), verify]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -150,6 +213,29 @@ export default function DomainsPage({ params }: { params: Promise<{ siteId: stri
             Add domain
           </button>
         </div>
+        {/* Visitors type both forms and other sites link to both, so serving
+            only one looks broken. Defaulted on, hidden when it cannot apply. */}
+        {!hostname.trim().toLowerCase().startsWith("www.") && (
+          <label className="mt-2.5 flex items-start gap-2 text-[11px] text-slate-600">
+            <input
+              type="checkbox"
+              checked={addWwwAlias}
+              onChange={(e) => setAddWwwAlias(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Also add{" "}
+              <span className="font-mono">
+                www.{hostname.trim() ? hostname.trim().toLowerCase() : "your-domain.com"}
+              </span>{" "}
+              and redirect it here
+              <span className="mt-0.5 block text-slate-400">
+                Recommended. Both addresses work, and visitors land on one canonical URL.
+              </span>
+            </span>
+          </label>
+        )}
+
         <p className="mt-2 text-[11px] text-slate-400">
           Enter the domain only — no https:// and no trailing path.
         </p>
@@ -394,6 +480,8 @@ function DomainCard({
   // Prefer the live verification result over the stored status, so the card
   // reflects the check the user just ran.
   const checks = result?.checks;
+  const requiredRecords = domain.dnsRecords.filter((r) => !r.optional);
+  const optionalRecords = domain.dnsRecords.filter((r) => r.optional);
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white">
@@ -483,17 +571,31 @@ function DomainCard({
       {domain.lastError && domain.status !== "CONNECTED" && (
         <div className="flex items-start gap-2 border-b border-amber-100 bg-amber-50 px-4 py-2.5 text-[11px] leading-relaxed text-amber-900">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          {domain.lastError}
+          <div>
+            <p>{domain.lastError}</p>
+            {/* Says the quiet part out loud: nobody needs to sit here clicking. */}
+            <p className="mt-1 flex items-center gap-1.5 text-amber-700/80">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              Checking automatically — this page rechecks every minute, and we keep checking hourly
+              even after you leave.
+            </p>
+          </div>
         </div>
       )}
 
       {sslReport && <SslPanel report={sslReport} />}
 
       <div className="p-4">
-        <h3 className="mb-2 text-xs font-semibold text-slate-800">DNS records</h3>
+        {/* One required record. The TXT is genuinely optional — pointing the
+            routing record at us already proves control of the zone — so it is
+            tucked away rather than presented as a second mandatory step. */}
+        <h3 className="mb-1 text-xs font-semibold text-slate-800">
+          Add this record at your registrar
+        </h3>
         <p className="mb-3 text-[11px] leading-relaxed text-slate-500">
-          Add these at your domain registrar (GoDaddy, Namecheap, Cloudflare, and so on). Keep both
-          records in place while the domain is connected.
+          One record is all that is needed. Add it wherever your domain&apos;s DNS is managed —
+          GoDaddy, Hostinger, Namecheap, Cloudflare — then press Verify. We check again
+          automatically every hour, so you can close this page.
         </p>
 
         <div className="overflow-x-auto">
@@ -508,17 +610,56 @@ function DomainCard({
               </tr>
             </thead>
             <tbody>
-              {domain.dnsRecords.map((record) => {
-                const check = checks?.find(
+              {requiredRecords.map((record) => {
+                // Prefer a result from this session; fall back to the stored
+                // observation so the table is populated after a page reload.
+                const live = checks?.find(
                   (c) => c.type === record.type && c.name === record.name,
                 );
                 return (
-                  <DnsRow key={`${record.type}-${record.name}`} record={record} matched={check?.matched} found={check?.found} />
+                  <DnsRow
+                    key={`${record.type}-${record.name}`}
+                    record={record}
+                    matched={live?.matched ?? record.matched ?? undefined}
+                    found={live?.found ?? record.found}
+                  />
                 );
               })}
             </tbody>
           </table>
         </div>
+
+        {optionalRecords.length > 0 && (
+          <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2">
+            <summary className="cursor-pointer text-[11px] font-medium text-slate-600">
+              Advanced: verify ownership before pointing live traffic here
+            </summary>
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              Only useful if the domain is currently serving a live site and you want us confirmed
+              first. Add this TXT record, press Verify, and the domain will show as verified without
+              any traffic moving. You can remove it once the routing record is in place.
+            </p>
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full min-w-[520px] text-left text-xs">
+                <tbody>
+                  {optionalRecords.map((record) => {
+                    const live = checks?.find(
+                      (c) => c.type === record.type && c.name === record.name,
+                    );
+                    return (
+                      <DnsRow
+                        key={`${record.type}-${record.name}`}
+                        record={record}
+                        matched={live?.matched ?? record.matched ?? undefined}
+                        found={live?.found ?? record.found}
+                      />
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
 
         {result && (
           <div

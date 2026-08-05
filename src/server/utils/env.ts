@@ -73,7 +73,20 @@ const EnvSchema = z.object({
   // Optional: when unset, sites are only reachable at APP_URL/s/<slug>.
   SITES_ROOT_DOMAIN: z.string().optional().default(""),
   // A-record IP for apex custom domains. Defaults to Vercel's shared apex IP.
+  // On a self-hosted VPS this is the server's public IP.
   SITE_APEX_IP: z.string().optional().default("76.76.21.21"),
+  // CNAME target tenants point subdomains at. Must be a bare hostname with no
+  // port or scheme. Defaults to APP_URL's hostname, which is correct only while
+  // that name resolves to the server tenant traffic must reach — set it
+  // explicitly so tenant DNS survives the dashboard moving.
+  SITE_CNAME_TARGET: z
+    .string()
+    .optional()
+    .default("")
+    .refine(
+      (v) => v === "" || /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(v),
+      "SITE_CNAME_TARGET must be a bare hostname — no scheme, port, or trailing dot",
+    ),
   // CA that issues certificates for custom domains, as it appears in a CAA
   // record. Used to warn a tenant when their CAA records would block issuance.
   // Vercel and most self-hosted setups use Let's Encrypt; Cloudflare-terminated
@@ -112,6 +125,24 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .default("sudo /usr/local/bin/greviewpilot-nginx-reload"),
+  // Address nginx proxies tenant traffic to: where this app actually listens.
+  //
+  // Must be configured separately from APP_URL. They are the same thing in
+  // development and different in production — APP_URL is the public HTTPS
+  // address, which behind nginx is nginx itself. Deriving the upstream from it
+  // produced `proxy_pass http://127.0.0.1:443`, pointing every tenant site back
+  // into nginx's own TLS port.
+  APP_UPSTREAM: z
+    .string()
+    .optional()
+    .default("127.0.0.1:3000")
+    .refine((v) => /^[a-z0-9.-]+:\d+$/i.test(v), "APP_UPSTREAM must be host:port")
+    .refine(
+      (v) => !["80", "443"].includes(v.split(":")[1] ?? ""),
+      "APP_UPSTREAM must not be port 80 or 443 — those are nginx's own ports, and " +
+        "pointing tenant vhosts at them creates a proxy loop. Use the port the Node " +
+        "process listens on, e.g. 127.0.0.1:3000.",
+    ),
 
   // Storage / Media
   STORAGE_PROVIDER: z.enum(["local", "s3", "cloudinary"]).default("local"),

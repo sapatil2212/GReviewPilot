@@ -45,18 +45,31 @@ async function provisioning() {
 // =====================================================================
 
 /**
- * Where tenants point their DNS.
+ * The platform's own hostname, used for reserved-name checks.
  *
- * Derived from APP_URL so a self-hosted deployment gets correct instructions
- * without extra configuration, and overridable for platforms that require a
- * specific apex IP or CNAME target.
+ * `hostname` and not `host`: the latter includes the port, which produced DNS
+ * instructions telling tenants to create a CNAME pointing at `localhost:3000`.
+ * A CNAME value is a bare DNS name and can never contain a port.
  */
 function platformHost(): string {
   try {
-    return new URL(env.APP_URL).host;
+    return new URL(env.APP_URL).hostname;
   } catch {
     return "app.example.com";
   }
+}
+
+/**
+ * CNAME target for subdomains.
+ *
+ * Configurable because the correct target is a deployment decision. Defaulting to
+ * the app's own hostname works only when that hostname resolves to the same
+ * server tenant traffic must reach, which is true for a single-box VPS and false
+ * the moment the dashboard moves elsewhere. Setting SITE_CNAME_TARGET explicitly
+ * also means tenant DNS does not have to be re-edited if the dashboard moves.
+ */
+function cnameTarget(): string {
+  return env.SITE_CNAME_TARGET || platformHost();
 }
 
 /** A-record IP for apex domains. Configurable via SITE_APEX_IP. */
@@ -68,7 +81,17 @@ export interface DnsRecord {
   value: string;
   ttl: number;
   purpose: "routing" | "verification";
+  /**
+   * False for the one record a tenant must create. True for records that only
+   * help in specific situations, so the UI can keep the common path to a single
+   * row instead of presenting two mandatory-looking records.
+   */
+  optional?: boolean;
   note?: string;
+  /** Last observed values, populated from the stored check results. */
+  found?: string[];
+  /** null when this record has not been checked since the domain was added. */
+  matched?: boolean | null;
 }
 
 /** True for `clinic.com`, false for `www.clinic.com`. */
@@ -102,11 +125,13 @@ export function buildDnsRecords(domain: SiteDomain): DnsRecord[] {
       note: "Some providers write @ as your domain name, or leave the host blank.",
     });
   } else {
+    // Only the leftmost label: registrars ask for the host relative to the zone,
+    // so "www" rather than "www.clinic.com".
     const sub = domain.hostname.split(".")[0];
     records.push({
       type: "CNAME",
       name: sub,
-      value: platformHost(),
+      value: cnameTarget(),
       ttl: 3600,
       purpose: "routing",
     });
@@ -118,7 +143,15 @@ export function buildDnsRecords(domain: SiteDomain): DnsRecord[] {
     value: domain.verificationToken,
     ttl: 3600,
     purpose: "verification",
-    note: "This proves you own the domain. You can delete it once the domain is connected.",
+    // Optional on purpose. Pointing the routing record at us already proves
+    // control of the zone — nobody else can do it — so demanding a second record
+    // adds a step without adding security. It stays available for tenants who
+    // want to prove ownership *before* moving live traffic, which matters when
+    // migrating a site that is already serving customers.
+    optional: true,
+    note:
+      "Optional. Only needed if you want us to confirm ownership before you point " +
+      "live traffic at us. You can delete it afterwards.",
   });
 
   return records;
@@ -146,6 +179,48 @@ export interface DnsCheck {
   record: DnsRecord;
   found: string[];
   matched: boolean;
+}
+
+/**
+ * Store the record definitions together with what was actually observed.
+ *
+ * Only the definitions were persisted before, so reopening the page showed every
+ * record as "Not checked" even though a check had just run — the results existed
+ * only in the browser's memory for the session that triggered them. The schema
+ * always intended to hold both ("plus the last observed values, so the UI can
+ * diff expected vs actual").
+ */
+function serializeChecks(checks: DnsCheck[]): object {
+  return checks.map((c) => ({
+    ...c.record,
+    found: c.found,
+    matched: c.matched,
+  })) as unknown as object;
+}
+
+/**
+ * Rebuild the canonical record list, carrying over the last observed values.
+ *
+ * Definitions come from `buildDnsRecords` rather than storage so a changed
+ * SITE_APEX_IP or CNAME target immediately shows the new expected value instead
+ * of whatever was correct when the domain was added. Observations are merged in
+ * from storage by type and name.
+ */
+function recordsWithObservations(domain: SiteDomain): DnsRecord[] {
+  const stored = Array.isArray(domain.dnsRecords)
+    ? (domain.dnsRecords as unknown as Array<Partial<DnsRecord>>)
+    : [];
+
+  return buildDnsRecords(domain).map((record) => {
+    const observed = stored.find((s) => s.type === record.type && s.name === record.name);
+    return {
+      ...record,
+      found: observed?.found ?? [],
+      // null distinguishes "never checked" from "checked and did not match",
+      // which are different things to show a tenant.
+      matched: typeof observed?.matched === "boolean" ? observed.matched : null,
+    };
+  });
 }
 
 // =====================================================================
@@ -267,6 +342,71 @@ function rootOf(hostname: string): string {
 }
 
 // =====================================================================
+// Reachability proof
+// =====================================================================
+
+export interface ReachabilityCheck {
+  /** True when the hostname served back its own verification token. */
+  reached: boolean;
+  /** Populated when the request succeeded but returned something unexpected. */
+  detail: string | null;
+}
+
+/**
+ * Confirm the hostname actually reaches this deployment.
+ *
+ * Fetched over plain HTTP on purpose: this runs before any certificate exists,
+ * and following the redirect to HTTPS would fail on an untrusted or missing
+ * certificate for reasons that have nothing to do with routing.
+ *
+ * A successful probe is a stronger signal than the A-record comparison — it
+ * proves traffic arrives rather than that a record looks correct — and it is the
+ * only signal that works for tenants behind Cloudflare or a load balancer, whose
+ * addresses will never equal SITE_APEX_IP.
+ */
+async function probeReachability(
+  hostname: string,
+  expectedToken: string,
+): Promise<ReachabilityCheck> {
+  const url = `http://${hostname}/.well-known/greviewpilot-domain-check`;
+  const controller = new AbortController();
+  // Short: an unreachable host must not hold a verification request open, and
+  // this runs for every domain on every scheduled sweep.
+  const timer = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      redirect: "follow",
+      headers: { "User-Agent": "GReviewPilot-DomainCheck/1.0" },
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      return { reached: false, detail: `Responded ${res.status} to the routing probe.` };
+    }
+
+    const body = (await res.text()).trim();
+    if (body === expectedToken) return { reached: true, detail: null };
+
+    // Something answered but it is not this deployment, or it is a different
+    // environment sharing the hostname — worth distinguishing from silence.
+    return {
+      reached: false,
+      detail: "The domain resolves to a server that is not this deployment.",
+    };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "AbortError";
+    return {
+      reached: false,
+      detail: aborted ? "The routing probe timed out." : null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// =====================================================================
 // Certificate reconciliation
 // =====================================================================
 
@@ -367,6 +507,147 @@ export async function reconcileCertificate(domain: SiteDomain): Promise<{
 }
 
 // =====================================================================
+// DNS evaluation
+// =====================================================================
+
+export interface DomainEvaluation {
+  checks: DnsCheck[];
+  /** The A/CNAME routing record resolves to us. */
+  recordMatches: boolean;
+  /** The optional TXT record is present and correct. */
+  txtMatches: boolean;
+  ownershipOk: boolean;
+  routingOk: boolean;
+  connected: boolean;
+  reachability: ReachabilityCheck;
+  status: SiteDomainStatus;
+  lastError: string | null;
+}
+
+/**
+ * Run every routing and ownership check for a domain and decide its status.
+ *
+ * Extracted so the interactive verify endpoint and the scheduled sweep apply
+ * identical rules. Two copies of this logic would eventually disagree about what
+ * "connected" means, and the disagreement would surface as a domain that works
+ * when a user clicks Verify but is downgraded an hour later by the cron.
+ *
+ * Performs lookups but writes nothing — callers persist.
+ */
+export async function evaluateDomain(domain: SiteDomain): Promise<DomainEvaluation> {
+  const records = buildDnsRecords(domain);
+  const checks = await Promise.all(records.map((r) => lookup(r, domain.hostname)));
+
+  const routing = checks.find((c) => c.record.purpose === "routing");
+  const verification = checks.find((c) => c.record.purpose === "verification");
+
+  const recordMatches = routing?.matched ?? false;
+  const txtMatches = verification?.matched ?? false;
+
+  const reachability: ReachabilityCheck = recordMatches
+    ? { reached: true, detail: null }
+    : await probeReachability(domain.hostname, domain.verificationToken);
+
+  const routingOk = recordMatches || reachability.reached;
+
+  /**
+   * Ownership follows from routing.
+   *
+   * Requiring a TXT record *in addition* to the routing record used to be
+   * mandatory, which meant every tenant created two records and a domain with
+   * perfectly good routing sat unverified because the second one was missing.
+   * That check bought nothing: only whoever controls the DNS zone can make a
+   * hostname resolve to us, so a matching routing record — or a probe that
+   * reaches us and returns this domain's own token — already proves control.
+   *
+   * The TXT path remains as an alternative so ownership can be confirmed before
+   * live traffic is moved, which is what a site mid-migration needs.
+   */
+  const ownershipOk = routingOk || txtMatches;
+  const connected = routingOk && ownershipOk;
+
+  const status = connected
+    ? SiteDomainStatus.CONNECTED
+    : // "Something is published but not pointing at us yet" is propagation in
+      // almost every case, so VERIFYING is both more accurate and less alarming
+      // than FAILED. Only the routing record counts here — a stray TXT from a
+      // previous attempt should not make an unpointed domain look in-progress.
+      (routing?.found.length ?? 0) > 0 || txtMatches
+      ? SiteDomainStatus.VERIFYING
+      : SiteDomainStatus.PENDING;
+
+  const routingType = routing?.record.type ?? "DNS";
+  const lastError = connected
+    ? null
+    : (routing?.found.length ?? 0) === 0
+      ? `No ${routingType} record found for this domain yet. Add the record below — changes usually apply within 30 minutes.`
+      : // A record exists but resolves somewhere else: a real misconfiguration
+        // the tenant must correct, not something that will fix itself.
+        (reachability.detail ??
+          `The ${routingType} record exists but does not point here yet. Found: ${routing?.found.slice(0, 3).join(", ")}`);
+
+  return {
+    checks,
+    recordMatches,
+    txtMatches,
+    ownershipOk,
+    routingOk,
+    connected,
+    reachability,
+    status,
+    lastError,
+  };
+}
+
+/**
+ * Re-run verification for a domain outside a user session.
+ *
+ * Needed because verification was previously only ever triggered by a button.
+ * DNS propagation routinely outlasts a tenant's patience: they set the records,
+ * click Verify, see "not found yet", and leave. Nothing then advanced the domain,
+ * so it sat in PENDING permanently even after the records went live. The
+ * scheduled sweep calls this so a correctly-configured domain completes on its
+ * own.
+ */
+export async function reverifyDomain(domain: SiteDomain): Promise<DomainEvaluation> {
+  const evaluation = await evaluateDomain(domain);
+
+  await siteDomainRepository.update(domain.id, {
+    status: evaluation.status,
+    lastCheckedAt: new Date(),
+    lastError: evaluation.lastError,
+    ...(evaluation.connected && !domain.verifiedAt ? { verifiedAt: new Date() } : {}),
+    ...(evaluation.connected && domain.sslStatus === SiteSslStatus.NONE
+      ? { sslStatus: SiteSslStatus.PENDING }
+      : {}),
+    dnsRecords: serializeChecks(evaluation.checks),
+  });
+
+  // First time a domain becomes reachable without anyone watching — worth an
+  // audit entry, since the state change has no user action behind it.
+  if (evaluation.connected && !domain.verifiedAt) {
+    await auditRepository
+      .record({
+        action: AuditAction.SITE_DOMAIN_VERIFIED,
+        tenantId: domain.tenantId,
+        metadata: {
+          siteId: domain.siteId,
+          hostname: domain.hostname,
+          source: "ssl-monitor",
+          via: evaluation.recordMatches ? "dns-record" : "http-probe",
+        },
+      })
+      .catch(() => undefined);
+    logger.info("Domain verified by scheduled sweep", {
+      hostname: domain.hostname,
+      via: evaluation.recordMatches ? "dns-record" : "http-probe",
+    });
+  }
+
+  return evaluation;
+}
+
+// =====================================================================
 // Service
 // =====================================================================
 
@@ -388,7 +669,9 @@ export const siteDomainService = {
       lastCheckedAt: d.lastCheckedAt,
       lastError: d.lastError,
       isApex: isApex(d.hostname),
-      dnsRecords: buildDnsRecords(d),
+      // Carries the last observed values so the table is populated on load, not
+      // only in the session that ran the check.
+      dnsRecords: recordsWithObservations(d),
       createdAt: d.createdAt,
     }));
   },
@@ -449,6 +732,54 @@ export const siteDomainService = {
       ...(req ? extractRequestContext(req) : {}),
     });
 
+    // Optional www counterpart, redirecting here. Best-effort: the domain the
+    // tenant actually asked for is already created, so a clash on the alias must
+    // not fail the request or leave them unsure which of the two exists.
+    let alias: { hostname: string; dnsRecords: DnsRecord[] } | null = null;
+    const wantsAlias = input.addWwwAlias && !input.hostname.startsWith("www.");
+    if (wantsAlias) {
+      const aliasHostname = `www.${input.hostname}`;
+      const clash = await siteDomainRepository.findByHostname(aliasHostname);
+      if (!clash) {
+        const created = await siteDomainRepository
+          .create({
+            siteId: site.id,
+            tenantId: ctx.tenantId,
+            hostname: aliasHostname,
+            isPrimary: false,
+            // The whole point of the alias: send visitors to the canonical host
+            // so links, analytics, and SEO consolidate on one address.
+            redirectToPrimary: true,
+            verificationToken: `greviewpilot-verify=${randomBytes(16).toString("hex")}`,
+            status: SiteDomainStatus.PENDING,
+          })
+          .catch((err) => {
+            logger.warn("Could not create the www alias", {
+              hostname: aliasHostname,
+              err: String(err),
+            });
+            return null;
+          });
+
+        if (created) {
+          const aliasWithRecords = await siteDomainRepository.update(created.id, {
+            dnsRecords: buildDnsRecords(created) as unknown as object,
+          });
+          alias = {
+            hostname: aliasWithRecords.hostname,
+            dnsRecords: buildDnsRecords(aliasWithRecords),
+          };
+          await auditRepository.record({
+            action: AuditAction.SITE_DOMAIN_ADDED,
+            tenantId: ctx.tenantId,
+            userId: ctx.userId,
+            metadata: { siteId: site.id, hostname: aliasHostname, alias: true },
+            ...(req ? extractRequestContext(req) : {}),
+          });
+        }
+      }
+    }
+
     return {
       id: withRecords.id,
       hostname: withRecords.hostname,
@@ -456,6 +787,8 @@ export const siteDomainService = {
       isApex: isApex(withRecords.hostname),
       dnsRecords: buildDnsRecords(withRecords),
       verificationToken: withRecords.verificationToken,
+      /** Present when a www counterpart was created alongside this domain. */
+      alias,
     };
   },
 
@@ -470,31 +803,10 @@ export const siteDomainService = {
     const domain = await siteDomainRepository.findById(ctx.tenantId, domainId);
     if (!domain || domain.siteId !== siteId) throw new NotFoundError("Domain not found");
 
-    const records = buildDnsRecords(domain);
-    const checks = await Promise.all(records.map((r) => lookup(r, domain.hostname)));
-
-    const routing = checks.find((c) => c.record.purpose === "routing");
-    const verification = checks.find((c) => c.record.purpose === "verification");
-
-    const routingOk = routing?.matched ?? false;
-    const ownershipOk = verification?.matched ?? false;
-    const connected = routingOk && ownershipOk;
-
-    const status = connected
-      ? SiteDomainStatus.CONNECTED
-      : checks.some((c) => c.found.length > 0)
-        ? // Records exist but do not match yet: almost always propagation, so
-          // VERIFYING is more accurate (and less alarming) than FAILED.
-          SiteDomainStatus.VERIFYING
-        : SiteDomainStatus.PENDING;
-
-    const lastError = connected
-      ? null
-      : !ownershipOk && !routingOk
-        ? "Neither the routing record nor the TXT verification record was found yet."
-        : !ownershipOk
-          ? "The TXT verification record was not found. DNS changes can take up to 48 hours."
-          : "The routing record does not point here yet.";
+    // Shared with the scheduled sweep so both paths agree on what "connected"
+    // means; see evaluateDomain().
+    const { checks, recordMatches, ownershipOk, routingOk, connected, reachability, status, lastError } =
+      await evaluateDomain(domain);
 
     const updated = await siteDomainRepository.update(domain.id, {
       status,
@@ -506,7 +818,7 @@ export const siteDomainService = {
       ...(connected && domain.sslStatus === SiteSslStatus.NONE
         ? { sslStatus: SiteSslStatus.PENDING }
         : {}),
-      dnsRecords: records as unknown as object,
+      dnsRecords: serializeChecks(checks),
     });
 
     // Once routing resolves, report the real certificate state straight away.
@@ -595,6 +907,14 @@ export const siteDomainService = {
       verifiedAt: updated.verifiedAt,
       lastError,
       ssl,
+      // Surfaced so the UI can explain *how* routing was proven — a domain that
+      // verified via the probe has a mismatched A record on purpose, and showing
+      // that record as failed would look like a bug.
+      routing: {
+        recordMatches,
+        reachable: reachability.reached,
+        detail: reachability.detail,
+      },
       checks: checks.map((c) => ({
         type: c.record.type,
         name: c.record.name,

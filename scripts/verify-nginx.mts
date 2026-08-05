@@ -174,6 +174,33 @@ check("prefixed so unrelated vhosts are never touched", vhostFilename("clinic.co
 check("filename matches the hostname", vhostFilename("clinic.com") === "greviewpilot-clinic.com.conf");
 check("filename is lowercased", vhostFilename("CLINIC.com") === "greviewpilot-clinic.com.conf");
 
+console.log("\nUpstream must never point back at nginx (proxy loop):");
+// The upstream used to be inferred from APP_URL. With a production
+// `https://app.example.com` that resolved to port 443, so every tenant vhost
+// proxied plain HTTP into nginx's own TLS listener. It is now explicit
+// configuration, validated in env.ts, and asserted here.
+for (const port of ["80", "443"]) {
+  const looping = renderVhost({ ...base, upstream: `127.0.0.1:${port}` });
+  check(
+    `port ${port} upstream is detectable in output`,
+    looping.includes(`proxy_pass http://127.0.0.1:${port};`),
+    "generator should still render it — env.ts is what rejects it",
+  );
+}
+const { env: loadedEnv } = await import("../src/server/utils/env");
+const upstreamPort = loadedEnv.APP_UPSTREAM.split(":")[1];
+check(
+  `configured APP_UPSTREAM (${loadedEnv.APP_UPSTREAM}) is not an nginx port`,
+  !["80", "443"].includes(upstreamPort ?? ""),
+  loadedEnv.APP_UPSTREAM,
+);
+check(
+  "generated config uses the configured upstream",
+  renderVhost({ ...base, upstream: loadedEnv.APP_UPSTREAM }).includes(
+    `proxy_pass http://${loadedEnv.APP_UPSTREAM};`,
+  ),
+);
+
 console.log("\nDeterminism:");
 check("same input produces identical output", renderVhost(base) === renderVhost(base));
 

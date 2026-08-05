@@ -101,7 +101,16 @@ export interface SitePageDto {
   updatedAt: string;
 }
 
-export interface DnsRecordDto {
+export interface DnsRecordDtoObservation {
+  /** Values last seen in DNS for this record. */
+  found?: string[];
+  /** null when the record has never been checked. */
+  matched?: boolean | null;
+  /** True for records that are not required in the normal flow. */
+  optional?: boolean;
+}
+
+export interface DnsRecordDto extends DnsRecordDtoObservation {
   type: "A" | "CNAME" | "TXT";
   name: string;
   value: string;
@@ -159,6 +168,16 @@ export interface DomainVerifyResultDto {
   lastError: string | null;
   /** Present once routing resolves, or when CAA would block issuance. */
   ssl: SslSummaryDto | null;
+  /**
+   * How routing was proven. `recordMatches` false with `reachable` true is a
+   * normal, working state — typical of Cloudflare-proxied domains, whose address
+   * can never equal our own.
+   */
+  routing: {
+    recordMatches: boolean;
+    reachable: boolean;
+    detail: string | null;
+  };
   checks: Array<{
     type: string;
     name: string;
@@ -518,7 +537,10 @@ export const siteApi = {
     }>(`${base}/${siteId}/domains`).then((r) => r.data);
   },
 
-  addDomain(siteId: string, input: { hostname: string; isPrimary?: boolean }) {
+  addDomain(
+    siteId: string,
+    input: { hostname: string; isPrimary?: boolean; addWwwAlias?: boolean },
+  ) {
     return apiFetch<{
       id: string;
       hostname: string;
@@ -526,6 +548,8 @@ export const siteApi = {
       isApex: boolean;
       dnsRecords: DnsRecordDto[];
       verificationToken: string;
+      /** Set when a www counterpart was created alongside the domain. */
+      alias: { hostname: string; dnsRecords: DnsRecordDto[] } | null;
     }>(`${base}/${siteId}/domains`, { method: "POST", body: JSON.stringify(input) }).then(
       (r) => r.data,
     );

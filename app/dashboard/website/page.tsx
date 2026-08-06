@@ -12,11 +12,13 @@
  * rather start from a generated draft than a template.
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
+  AlertTriangle,
+  CheckCircle2,
   ClipboardList,
   ExternalLink,
   Globe,
@@ -36,9 +38,27 @@ import { listBlueprints } from "@/site/ai/blueprints";
 import { TemplateGallery } from "./_components/template-gallery";
 import { cn } from "@/lib/utils";
 
+/**
+ * Where the create-with-AI flow currently is.
+ *
+ * Tracked as a phase rather than a boolean because the flow is two requests
+ * (create the site row, then generate its pages) and the second one can fail
+ * on its own — after the first has already succeeded. That intermediate state
+ * needs to be representable, or the user is left with a site they cannot see.
+ */
+type BuildPhase = "idle" | "creating" | "generating" | "failed";
+
 export default function WebsitesPage() {
   const router = useRouter();
-  const [creating, setCreating] = useState(false);
+  const [phase, setPhase] = useState<BuildPhase>("idle");
+  /**
+   * Set as soon as the site row exists. Kept after a failed generation so a
+   * retry regenerates THAT site instead of creating another one — without it,
+   * every retry left another half-built site behind.
+   */
+  const [draftSiteId, setDraftSiteId] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [lastBrief, setLastBrief] = useState<AiBrief | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const galleryRef = useRef<HTMLDivElement | null>(null);
 
@@ -48,6 +68,78 @@ export default function WebsitesPage() {
 
   const focusGallery = () => {
     galleryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  /**
+   * Create a site and generate its pages from a brief.
+   *
+   * Deliberately two requests: the site row must exist before generation so
+   * the AI revision has something to attach to, and a failed generation still
+   * leaves a real, editable site behind rather than nothing.
+   *
+   * The important part is what happens when step 2 fails (rate limit, model
+   * timeout, dropped connection). The site already exists, so it must be
+   * surfaced — otherwise it is invisible in the list and the user re-submits,
+   * creating another one every time. On failure we refresh the list, keep the
+   * site id for a retry that reuses it, and offer to open the editor.
+   */
+  const build = async (brief: AiBrief) => {
+    // Guard against a double-submit racing a second site into existence.
+    if (phase === "creating" || phase === "generating") return;
+
+    setLastBrief(brief);
+    setFailure(null);
+
+    let siteId = draftSiteId;
+
+    // Step 1 — create, unless a previous attempt already got this far.
+    if (!siteId) {
+      setPhase("creating");
+      try {
+        const site = await siteApi.create({
+          name: brief.businessName,
+          industry: brief.industry || undefined,
+        });
+        siteId = site.id;
+        setDraftSiteId(site.id);
+      } catch (err) {
+        setPhase("failed");
+        setFailure(
+          err instanceof ApiClientError ? err.message : "Could not create the website.",
+        );
+        return;
+      }
+    }
+
+    // Step 2 — generate. The site exists from here on, so every exit path
+    // below has to account for it.
+    setPhase("generating");
+    try {
+      const result = await siteApi.generate(siteId, {
+        prompt: brief.prompt,
+        businessName: brief.businessName,
+        industry: brief.industry || undefined,
+        replaceExisting: true,
+      });
+      toast.success(
+        result.source === "ai"
+          ? `Created ${result.pages.length} pages with AI`
+          : `Created ${result.pages.length} pages from the ${brief.industry || "local business"} template`,
+        { description: result.message },
+      );
+      setPhase("idle");
+      setDraftSiteId(null);
+      router.push(`/builder/${siteId}`);
+    } catch (err) {
+      setPhase("failed");
+      setFailure(
+        err instanceof ApiClientError
+          ? err.message
+          : "The website was created, but generating its pages failed.",
+      );
+      // Make the half-built site visible so it is never a silent orphan.
+      refresh();
+    }
   };
 
   return (
@@ -63,7 +155,9 @@ export default function WebsitesPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setAiOpen((v) => !v)}
+            // Not a plain toggle: collapsing the panel mid-build would hide the
+            // progress and, on failure, the only link to the site just created.
+            onClick={() => setAiOpen((v) => (phase === "idle" ? !v : true))}
             className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
           >
             <Sparkles className="h-4 w-4" />
@@ -82,38 +176,18 @@ export default function WebsitesPage() {
 
       {aiOpen && (
         <BriefPanel
-          busy={creating}
-          onCancel={() => setAiOpen(false)}
-          onSubmit={async (input) => {
-            setCreating(true);
-            try {
-              // Two steps, deliberately: the site row must exist before
-              // generation so the AI revision has something to attach to and a
-              // failed generation still leaves an editable site behind.
-              const site = await siteApi.create({
-                name: input.businessName,
-                industry: input.industry || undefined,
-              });
-              const result = await siteApi.generate(site.id, {
-                prompt: input.prompt,
-                businessName: input.businessName,
-                industry: input.industry || undefined,
-                replaceExisting: true,
-              });
-              toast.success(
-                result.source === "ai"
-                  ? `Created ${result.pages.length} pages with AI`
-                  : `Created ${result.pages.length} pages from the ${input.industry || "local business"} template`,
-                { description: result.message },
-              );
-              router.push(`/builder/${site.id}`);
-            } catch (err) {
-              toast.error(
-                err instanceof ApiClientError ? err.message : "Could not create the website",
-              );
-              setCreating(false);
-            }
+          phase={phase}
+          failure={failure}
+          canRetry={Boolean(draftSiteId)}
+          draftSiteId={draftSiteId}
+          initial={lastBrief}
+          onCancel={() => {
+            setAiOpen(false);
+            setPhase("idle");
+            setFailure(null);
+            setDraftSiteId(null);
           }}
+          onSubmit={(brief) => void build(brief)}
         />
       )}
 
@@ -168,19 +242,36 @@ export default function WebsitesPage() {
 // AI brief
 // =====================================================================
 
+export interface AiBrief {
+  businessName: string;
+  industry: string;
+  prompt: string;
+}
+
 function BriefPanel({
-  busy,
+  phase,
+  failure,
+  canRetry,
+  draftSiteId,
+  initial,
   onCancel,
   onSubmit,
 }: {
-  busy: boolean;
+  phase: BuildPhase;
+  failure: string | null;
+  /** True once the site row exists, so a retry regenerates it in place. */
+  canRetry: boolean;
+  draftSiteId: string | null;
+  initial: AiBrief | null;
   onCancel: () => void;
-  onSubmit: (input: { businessName: string; industry: string; prompt: string }) => void;
+  onSubmit: (input: AiBrief) => void;
 }) {
-  const [businessName, setBusinessName] = useState("");
-  const [industry, setIndustry] = useState("");
-  const [prompt, setPrompt] = useState("");
+  const [businessName, setBusinessName] = useState(initial?.businessName ?? "");
+  const [industry, setIndustry] = useState(initial?.industry ?? "");
+  const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const blueprints = listBlueprints();
+
+  const busy = phase === "creating" || phase === "generating";
 
   const example = industry
     ? `A modern website for my ${industry.toLowerCase()}. Friendly and trustworthy, with online booking and our Google reviews.`
@@ -190,7 +281,7 @@ function BriefPanel({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (!businessName.trim()) return;
+        if (!businessName.trim() || busy) return;
         onSubmit({
           businessName: businessName.trim(),
           industry,
@@ -251,6 +342,34 @@ function BriefPanel({
         />
       </label>
 
+      {busy && <BuildProgress phase={phase} />}
+
+      {phase === "failed" && failure && (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3">
+          <p className="flex items-start gap-2 text-xs font-semibold text-amber-900">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            {failure}
+          </p>
+          {canRetry && (
+            <>
+              <p className="mt-1.5 pl-5 text-[11px] leading-relaxed text-amber-800">
+                Your website was created and is safe — only the AI page generation failed. Try
+                again, or open it now and edit it yourself.
+              </p>
+              {draftSiteId && (
+                <Link
+                  href={`/builder/${draftSiteId}`}
+                  className="ml-5 mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
+                >
+                  <Pencil className="h-3 w-3" />
+                  Open the editor
+                </Link>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="mt-4 flex items-center justify-end gap-2">
         <button
           type="button"
@@ -258,7 +377,7 @@ function BriefPanel({
           disabled={busy}
           className="rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
         >
-          Cancel
+          {phase === "failed" ? "Close" : "Cancel"}
         </button>
         <button
           type="submit"
@@ -266,16 +385,76 @@ function BriefPanel({
           className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
         >
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          {busy ? "Building your website…" : "Build my website"}
+          {busy
+            ? phase === "creating"
+              ? "Creating…"
+              : "Writing your pages…"
+            : canRetry
+              ? "Try generating again"
+              : "Build my website"}
         </button>
       </div>
-
-      {busy && (
-        <p className="mt-2 text-right text-[11px] text-slate-400">
-          This usually takes 15 to 40 seconds.
-        </p>
-      )}
     </form>
+  );
+}
+
+/**
+ * Staged progress for the build.
+ *
+ * The steps mirror the two real requests rather than inventing a percentage —
+ * a fake progress bar that stalls at 80% is worse than none. An elapsed
+ * counter is shown instead, so a slow model call still looks alive.
+ */
+function BuildProgress({ phase }: { phase: BuildPhase }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const started = Date.now();
+    const timer = window.setInterval(
+      () => setElapsed(Math.round((Date.now() - started) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const steps: Array<{ id: BuildPhase; label: string }> = [
+    { id: "creating", label: "Creating your website" },
+    { id: "generating", label: "Writing your pages and choosing a look" },
+  ];
+  const activeIndex = steps.findIndex((s) => s.id === phase);
+
+  return (
+    <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+      <ul className="space-y-1.5">
+        {steps.map((step, i) => {
+          const done = i < activeIndex;
+          const active = i === activeIndex;
+          return (
+            <li key={step.id} className="flex items-center gap-2 text-xs">
+              {done ? (
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+              ) : active ? (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600" />
+              ) : (
+                <span className="h-3.5 w-3.5 shrink-0 rounded-full border border-slate-300" />
+              )}
+              <span
+                className={cn(
+                  done && "text-slate-500",
+                  active && "font-medium text-slate-900",
+                  !done && !active && "text-slate-400",
+                )}
+              >
+                {step.label}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-2 text-[11px] text-slate-400">
+        {elapsed}s elapsed · this usually takes 15 to 40 seconds. Please keep this tab open.
+      </p>
+    </div>
   );
 }
 

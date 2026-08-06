@@ -25,6 +25,7 @@ import { submitFormSchema } from "@/server/validators/site.schema";
 import { callerKey, checkRateLimit } from "@/server/middleware/rateLimit";
 import { extractRequestContext } from "@/server/middleware/requestContext";
 import { emailService } from "@/server/email/email.service";
+import { emailSettingsService } from "@/server/services/emailSettings.service";
 import { handleError, ok } from "@/server/utils/response";
 import { NotFoundError, ValidationError } from "@/server/utils/errors";
 import { logger } from "@/server/utils/logger";
@@ -198,10 +199,28 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     // Notify the tenant, but never let a mail failure fail the visitor's
     // submission — the lead is already safely stored.
+    //
+    // Recipients are the union of: the form's own notify list, the workspace
+    // owner's business email, and any dedicated lead-notification address —
+    // so a lead reaches the owner even when a form has no explicit notify
+    // list. When the tenant has connected their own SMTP server, delivery
+    // goes through it so the mail arrives from their domain.
     if (form && spam.score < 0.6) {
-      const recipients = Array.isArray(form.notifyEmails)
+      const formRecipients = Array.isArray(form.notifyEmails)
         ? (form.notifyEmails as unknown[]).filter((e): e is string => typeof e === "string")
         : [];
+
+      const delivery = await emailSettingsService
+        .resolveLeadDelivery(site.tenantId)
+        .catch(() => ({ recipients: [] as string[] }));
+
+      // Dedupe case-insensitively while preserving the first-seen address.
+      const recipients = Array.from(
+        new Map(
+          [...formRecipients, ...delivery.recipients].map((e) => [e.toLowerCase(), e]),
+        ).values(),
+      );
+
       if (recipients.length > 0) {
         void emailService
           .sendSiteLeadEmail({
@@ -213,6 +232,7 @@ export async function POST(req: NextRequest, { params }: Params) {
               value: String(value),
             })),
             pagePath: input.pagePath,
+            ...("smtp" in delivery && delivery.smtp ? { smtp: delivery.smtp } : {}),
           })
           .catch((err) =>
             logger.warn("Form notification email failed", {

@@ -17,4 +17,8 @@ export const tenantRepository = {
   updateStatus(id: string, status: TenantStatus) {
     return prisma.tenant.update({ where: { id }, data: { status } });
   },
+
+  update(id: string, data: Prisma.TenantUpdateInput) {
+    return prisma.tenant.update({ where: { id }, data });
+  },
 };

@@ -57,3 +57,67 @@ class NodemailerEmailClient implements EmailClient {
 }
 
 export const emailClient: EmailClient = new NodemailerEmailClient();
+
+// ---------------------------------------------------------------------
+// Per-tenant SMTP
+//
+// Tenants can connect their own mail server so lead notifications arrive
+// from their own domain rather than the platform's shared sender. These
+// helpers build a FRESH transport per call rather than reusing the cached
+// global one — a tenant's credentials must never leak into another tenant's
+// (or the platform's) transport.
+// ---------------------------------------------------------------------
+
+export interface SmtpTransportConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  username: string;
+  password: string;
+  fromEmail: string;
+  fromName?: string;
+}
+
+function buildTenantTransport(config: SmtpTransportConfig): Transporter {
+  return nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    auth: { user: config.username, pass: config.password },
+  });
+}
+
+function fromHeader(config: SmtpTransportConfig): string {
+  return config.fromName ? `"${config.fromName}" <${config.fromEmail}>` : config.fromEmail;
+}
+
+/** Send a message through a tenant's own SMTP server. Throws on failure. */
+export async function sendWithSmtp(
+  config: SmtpTransportConfig,
+  message: EmailMessage,
+): Promise<void> {
+  const transporter = buildTenantTransport(config);
+  const info = await transporter.sendMail({
+    from: fromHeader(config),
+    to: message.to,
+    bcc: message.bcc || undefined,
+    subject: message.subject,
+    text: message.text,
+    html: message.html,
+  });
+  logger.info("Email sent via tenant SMTP", {
+    to: message.to,
+    subject: message.subject,
+    host: config.host,
+    messageId: info.messageId,
+  });
+}
+
+/**
+ * Verify a tenant's SMTP credentials without sending anything (SMTP handshake
+ * + AUTH). Used by the "Test connection" button before a config is saved.
+ */
+export async function verifySmtp(config: SmtpTransportConfig): Promise<void> {
+  const transporter = buildTenantTransport(config);
+  await transporter.verify();
+}

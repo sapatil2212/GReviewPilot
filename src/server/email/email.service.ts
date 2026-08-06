@@ -4,7 +4,7 @@
  * or the transport directly.
  */
 
-import { emailClient } from "./client";
+import { emailClient, sendWithSmtp, type SmtpTransportConfig } from "./client";
 import {
   invitationTemplate,
   newDeviceLoginTemplate,
@@ -47,6 +47,8 @@ export const emailService = {
     formName: string;
     fields: Array<{ label: string; value: string }>;
     pagePath?: string | null;
+    /** When present, deliver through the tenant's own mail server. */
+    smtp?: SmtpTransportConfig;
   }) {
     const msg = siteLeadTemplate({
       appUrl: env.APP_URL,
@@ -56,7 +58,32 @@ export const emailService = {
       pagePath: opts.pagePath,
       dashboardUrl: `${env.APP_URL}/dashboard/website`,
     });
-    await Promise.all(opts.to.map((recipient) => safeSend(recipient, msg)));
+    await Promise.all(
+      opts.to.map((recipient) =>
+        opts.smtp
+          ? sendWithSmtp(opts.smtp, { to: recipient, ...msg }).catch((err) =>
+              logger.error("Tenant SMTP lead email failed", {
+                to: recipient,
+                err: err instanceof Error ? err.message : String(err),
+              }),
+            )
+          : safeSend(recipient, msg),
+      ),
+    );
+  },
+
+  /**
+   * Send a test message through a tenant's SMTP config, so they can confirm
+   * the connection works before relying on it for real leads. Throws on
+   * failure (unlike the fire-and-forget lead path) so the UI can surface why.
+   */
+  async sendSmtpTestEmail(opts: { smtp: SmtpTransportConfig; to: string }) {
+    await sendWithSmtp(opts.smtp, {
+      to: opts.to,
+      subject: "Your SMTP connection works",
+      html: `<p>This is a test email from your website builder. If you are reading this, your SMTP settings are working and new website leads will be delivered to your inbox.</p>`,
+      text: "This is a test email from your website builder. Your SMTP settings are working.",
+    });
   },
 
   async sendVerificationEmail(opts: { to: string; firstName?: string; token: string }) {

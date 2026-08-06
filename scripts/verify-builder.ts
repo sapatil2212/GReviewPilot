@@ -31,7 +31,7 @@ import {
 } from "../src/site/document/operations";
 import { applyOperations, buildOutline } from "../src/site/ai/operations";
 import { blueprintSpec, compileSite } from "../src/site/ai/compile";
-import { listBlueprints } from "../src/site/ai/blueprints";
+import { listBlueprints, listBlueprintVariants } from "../src/site/ai/blueprints";
 import { createTheme, contrastRatio } from "../src/site/document/theme";
 import { auditPage } from "../src/site/ai/audit";
 import { siteDocumentSchema } from "../src/server/validators/site.schema";
@@ -335,8 +335,19 @@ check(
 
 section("Industry blueprints");
 
-for (const blueprint of listBlueprints()) {
-  const spec = blueprintSpec({ businessName: "Test Business", industry: blueprint.label });
+// Primary blueprints resolve through getBlueprint(industry); variants are
+// unreachable that way (resolveIndustryKey is many-to-one) and must be handed
+// to blueprintSpec directly, exactly as the template seeder does.
+const allBlueprints = [
+  ...listBlueprints().map((b) => ({ blueprint: b, override: false })),
+  ...listBlueprintVariants().map((b) => ({ blueprint: b, override: true })),
+];
+
+for (const { blueprint, override } of allBlueprints) {
+  const spec = blueprintSpec(
+    { businessName: "Test Business", industry: blueprint.label },
+    override ? { blueprintOverride: blueprint } : {},
+  );
   const compiled = compileSite(spec, {
     businessName: "Test Business",
     industry: blueprint.label,

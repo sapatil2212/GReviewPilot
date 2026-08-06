@@ -372,6 +372,93 @@ const heroCentered: PresetBuilder = (input) => {
   return b.done(section);
 };
 
+/**
+ * Compact page header for inner (non-home) pages.
+ *
+ * Inner pages used to open straight into a services grid or a team row, which
+ * left them with no H1, no title container, and no call to action on the
+ * first screen — the audit flagged every one of them. This gives an inner
+ * page a proper heading band: an H1 with the page's title, a one-line intro,
+ * and a CTA that sits above the fold. It is deliberately image-free so it
+ * reads as a page title, not a second hero competing with the home page.
+ */
+const pageHeader: PresetBuilder = (input) => {
+  const b = new Builder("page-header");
+  const kids: NodeId[] = [];
+
+  if (input.eyebrow) {
+    kids.push(
+      b.add("Text", {
+        props: { text: input.eyebrow },
+        style: { ...eyebrow(), textAlign: "center" },
+      }),
+    );
+  }
+  kids.push(
+    b.add("Heading", {
+      props: { text: input.title ?? input.businessName ?? "Page", level: "h1" },
+      style: { fontSize: "5xl", textAlign: "center", lineHeight: "tight" },
+      responsive: { mobile: { fontSize: "3xl" } },
+      animation: { kind: "fade-up", duration: 600 },
+    }),
+  );
+  if (input.subtitle) {
+    kids.push(
+      b.add("Text", {
+        props: { text: input.subtitle },
+        style: { ...mutedText(), textAlign: "center", maxWidth: "62ch" },
+        animation: { kind: "fade-up", duration: 600, delay: 100 },
+      }),
+    );
+  }
+
+  // A CTA in the header keeps an actionable button above the fold on inner
+  // pages, where the primary conversion section (contact/appointment) is
+  // otherwise several screens down.
+  const buttons: NodeId[] = [
+    b.add("Button", {
+      props: { label: input.ctaLabel ?? "Book an appointment", variant: "primary", size: "lg" },
+      action: { kind: "url", href: input.ctaHref ?? "#contact" },
+    }),
+  ];
+  if (input.phone) {
+    buttons.push(
+      b.add("Button", {
+        props: { label: input.secondaryCtaLabel ?? "Call us", variant: "outline", size: "lg" },
+        action: { kind: "tel", phone: input.phone },
+      }),
+    );
+  }
+  kids.push(
+    b.add("Box", {
+      name: "Actions",
+      style: { ...row("sm"), justifyContent: "center", marginTop: "sm" },
+      children: buttons,
+      animation: { kind: "fade-up", duration: 600, delay: 200 },
+    }),
+  );
+
+  const inner = b.add("Box", {
+    name: "Page header copy",
+    style: { ...stack("md", "center"), textAlign: "center", maxWidth: "820px" },
+    children: kids,
+  });
+
+  const section = b.add("Section", {
+    name: "Page header",
+    props: { as: "section", contained: true, anchorId: "top" },
+    style: {
+      paddingTop: "3xl",
+      paddingBottom: "3xl",
+      backgroundColor: { token: "muted" },
+      display: "flex",
+      justifyContent: "center",
+    },
+    children: [inner],
+  });
+  return b.done(section);
+};
+
 const about: PresetBuilder = (input) => {
   const b = new Builder("about");
   const copy = b.add("Box", {
@@ -1115,6 +1202,7 @@ export const SECTION_PRESETS: SectionPreset[] = [
   { key: "navbar", label: "Navbar", group: "header", icon: "Menu", description: "Header with logo, nav links, and a CTA.", build: navbar },
   { key: "hero-split", label: "Hero — split", group: "hero", icon: "Columns2", description: "Headline and copy beside an image.", build: heroSplit },
   { key: "hero-centered", label: "Hero — centered", group: "hero", icon: "AlignCenter", description: "Big centered headline over a background image.", build: heroCentered },
+  { key: "page-header", label: "Page header", group: "hero", icon: "Heading1", description: "Compact page title band with an H1 and a CTA, for inner pages.", build: pageHeader },
   { key: "about", label: "About", group: "content", icon: "Info", description: "Story and highlights beside a photo.", build: about },
   { key: "services", label: "Services", group: "content", icon: "LayoutGrid", description: "Grid of service cards with icons.", build: services },
   { key: "team", label: "Team / Doctors", group: "content", icon: "Users", description: "Portraits, names, and roles.", build: team },

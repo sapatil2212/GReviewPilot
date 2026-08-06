@@ -17,7 +17,7 @@ import { createTheme } from "@/site/document/theme";
 import { buildSection, resolvePresetAlias } from "@/site/registry/presets";
 import type { PresetInput } from "@/site/registry/presets";
 import type { BrandContext, SeoMeta, SiteDocument, ThemeTokens } from "@/site/document/types";
-import { getBlueprint } from "./blueprints";
+import { getBlueprint, type Blueprint } from "./blueprints";
 import { industryImage, industryImageSet, type ImageRole } from "./imagery";
 import type { PageSpec, SectionSpec, SiteSpec } from "./spec";
 
@@ -319,6 +319,16 @@ export interface BlueprintSpecOptions {
    * otherwise finished design look broken.
    */
   demoContent?: boolean;
+  /**
+   * Use this blueprint instead of resolving one from `ctx.industry`.
+   *
+   * `getBlueprint()` resolves free-text industry labels to a blueprint key
+   * many-to-one, so a second, alternate-layout blueprint for an industry
+   * (see `listBlueprintVariants()` in blueprints.ts) is never reachable
+   * through that lookup — it needs to be handed in directly. Used by the
+   * template seeder to compile variant templates.
+   */
+  blueprintOverride?: Blueprint;
 }
 
 /** Sample staff, per industry, used only when `demoContent` is on. */
@@ -436,14 +446,24 @@ export function blueprintSpec(
   ctx: CompileContext,
   options: BlueprintSpecOptions = {},
 ): SiteSpec {
-  const blueprint = getBlueprint(ctx.industry);
+  const blueprint = options.blueprintOverride ?? getBlueprint(ctx.industry);
   const name = ctx.businessName;
   const where = ctx.city ? ` in ${ctx.city}` : "";
   const services = blueprint.defaultServices;
   const demo = options.demoContent === true;
 
-  const sectionContent = (preset: string): SectionSpec => {
+  const sectionContent = (preset: string, pageTitle?: string): SectionSpec => {
     switch (resolvePresetAlias(preset) || preset) {
+      case "page-header":
+        return {
+          preset,
+          eyebrow: blueprint.label,
+          title: pageTitle ?? name,
+          subtitle: `${pageTitle ?? name} at ${name} — trusted ${blueprint.label.toLowerCase()} services${where}.`,
+          ctaLabel: "Book an appointment",
+          ctaHref: "#contact",
+          secondaryCtaLabel: ctx.phone ? "Call us" : "Learn more",
+        };
       case "hero-split":
       case "hero-centered":
         return {
@@ -597,7 +617,7 @@ export function blueprintSpec(
     pages: blueprint.pages.map((p) => ({
       title: p.title,
       path: p.path,
-      sections: p.sections.map(sectionContent),
+      sections: p.sections.map((s) => sectionContent(s, p.title)),
     })),
     summary: `Generated a ${blueprint.pages.length}-page ${blueprint.label.toLowerCase()} website for ${name} using the ${blueprint.label} blueprint. Every section is editable — ask me to change anything.`,
   };

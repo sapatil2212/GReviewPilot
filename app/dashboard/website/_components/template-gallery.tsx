@@ -14,14 +14,24 @@
  * one request, and instant search beats a round trip per keystroke.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, Eye, LayoutTemplate, RefreshCw, Search, X } from "lucide-react";
 import { useApi } from "@/lib/api/useApi";
 import { siteTemplateApi, type SiteTemplateDto } from "@/lib/api/site";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { LiveTemplateFrame } from "./live-template-frame";
 import { TemplatePreviewModal } from "./template-preview-modal";
 import { UseTemplateDialog } from "./use-template-dialog";
 import { cn } from "@/lib/utils";
+
+/** Number of templates shown before the user has to hit "Show more". */
+const PAGE_SIZE = 6;
 
 export function TemplateGallery({
   onCreated,
@@ -36,9 +46,16 @@ export function TemplateGallery({
 
   const [search, setSearch] = useState("");
   const [industry, setIndustry] = useState<string>("all");
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [previewing, setPreviewing] = useState<SiteTemplateDto | null>(null);
   const [choosing, setChoosing] = useState<SiteTemplateDto | null>(null);
   const [creating, setCreating] = useState(false);
+
+  // Collapse back to the first page whenever the search or filter changes,
+  // so "Show more" always starts from a predictable spot.
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [search, industry]);
 
   const industries = useMemo(() => {
     const seen = new Set<string>();
@@ -46,7 +63,7 @@ export function TemplateGallery({
     return Array.from(seen).sort((a, b) => a.localeCompare(b));
   }, [templates]);
 
-  const visible = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return templates.filter((t) => {
       if (industry !== "all" && t.industry !== industry) return false;
@@ -62,10 +79,15 @@ export function TemplateGallery({
     });
   }, [templates, search, industry]);
 
+  // Only render a handful at a time; the rest load in on "Show more" so the
+  // page stays a template picker instead of turning into a long scroll.
+  const visible = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
+  const hasMore = visibleCount < filtered.length;
+
   return (
     <section className="rounded-xl border border-slate-200 bg-white">
-      <header className="flex flex-wrap items-end justify-between gap-3 border-b border-slate-100 px-5 py-4">
-        <div>
+      <header className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0 lg:max-w-lg">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
             <LayoutTemplate className="h-4 w-4 text-blue-600" />
             Website templates
@@ -76,7 +98,7 @@ export function TemplateGallery({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2 lg:ml-auto">
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input
@@ -85,9 +107,32 @@ export function TemplateGallery({
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search templates…"
               aria-label="Search templates"
-              className="w-44 rounded-lg border border-slate-200 py-1.5 pl-8 pr-2 text-xs focus:border-blue-500 focus:outline-none sm:w-56"
+              className="w-40 rounded-lg border border-slate-200 py-1.5 pl-8 pr-2 text-xs focus:border-blue-500 focus:outline-none sm:w-56"
             />
           </div>
+
+          {industries.length > 1 && (
+            <Select value={industry} onValueChange={setIndustry}>
+              <SelectTrigger
+                aria-label="Filter by business type"
+                className="h-auto w-auto min-w-[8.5rem] gap-1.5 rounded-lg border-slate-200 py-1.5 px-2.5 text-xs shadow-none focus:ring-blue-500"
+              >
+                <SelectValue placeholder="All types" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All types ({templates.length})</SelectItem>
+                {industries.map((name) => {
+                  const count = templates.filter((t) => t.industry === name).length;
+                  return (
+                    <SelectItem key={name} value={name}>
+                      {name} ({count})
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+          )}
+
           <button
             type="button"
             onClick={refresh}
@@ -99,20 +144,6 @@ export function TemplateGallery({
           </button>
         </div>
       </header>
-
-      {industries.length > 1 && (
-        <div className="flex gap-1.5 overflow-x-auto border-b border-slate-100 px-5 py-2.5">
-          <FilterChip active={industry === "all"} onClick={() => setIndustry("all")}>
-            All types
-            <span className="ml-1 text-[10px] opacity-60">{templates.length}</span>
-          </FilterChip>
-          {industries.map((name) => (
-            <FilterChip key={name} active={industry === name} onClick={() => setIndustry(name)}>
-              {name}
-            </FilterChip>
-          ))}
-        </div>
-      )}
 
       <div className="p-5">
         {loading && (
@@ -160,7 +191,7 @@ export function TemplateGallery({
           </div>
         )}
 
-        {!loading && !error && templates.length > 0 && visible.length === 0 && (
+        {!loading && !error && templates.length > 0 && filtered.length === 0 && (
           <div className="rounded-lg border border-dashed border-slate-300 px-6 py-12 text-center">
             <Search className="mx-auto h-7 w-7 text-slate-300" />
             <h3 className="mt-3 text-sm font-semibold text-slate-800">No matching templates</h3>
@@ -182,16 +213,30 @@ export function TemplateGallery({
         )}
 
         {visible.length > 0 && (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {visible.map((template) => (
-              <TemplateCard
-                key={template.id}
-                template={template}
-                onPreview={() => setPreviewing(template)}
-                onUse={() => setChoosing(template)}
-              />
-            ))}
-          </div>
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {visible.map((template) => (
+                <TemplateCard
+                  key={template.id}
+                  template={template}
+                  onPreview={() => setPreviewing(template)}
+                  onUse={() => setChoosing(template)}
+                />
+              ))}
+            </div>
+
+            {hasMore && (
+              <div className="mt-5 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Show more ({filtered.length - visible.length} remaining)
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -332,28 +377,3 @@ function TemplateCardFallback({ template }: { template: SiteTemplateDto }) {
   );
 }
 
-function FilterChip({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
-        active
-          ? "bg-slate-900 text-white"
-          : "border border-slate-200 text-slate-600 hover:bg-slate-50",
-      )}
-    >
-      {children}
-    </button>
-  );
-}

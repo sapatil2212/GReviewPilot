@@ -502,6 +502,7 @@ export function Canvas({
 
   return (
     <div
+      data-tour="canvas"
       className="flex-1 overflow-auto bg-slate-100 p-6"
       onClick={(e) => {
         // Clicking the grey surround clears the selection.

@@ -11,21 +11,61 @@
  * since drag-and-drop alone is not accessible.
  */
 
-import { useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { LayoutGrid, List, Search } from "lucide-react";
 import { paletteByCategory, type ComponentDefinition } from "@/site/registry/definitions";
-import { presetsByGroup, type SectionPreset } from "@/site/registry/presets";
+import { presetsByGroup, type PresetInput, type SectionPreset } from "@/site/registry/presets";
 import { resolveIcon } from "@/site/render/icons";
+import { SectionPreview, type SectionPreviewContext } from "./SectionPreview";
 import { cn } from "@/lib/utils";
+
+/** Remembers the preview/list choice between sessions. */
+const VIEW_STORAGE_KEY = "sb:add-panel:section-view";
 
 export interface AddPanelProps {
   onAddSection: (presetKey: string) => void;
   onAddComponent: (type: string) => void;
+  /**
+   * Render context (minus the document) used to draw section thumbnails with
+   * the site's own theme. Optional so the panel still works as a plain list if
+   * a caller has no context to give it.
+   */
+  previewCtx?: SectionPreviewContext;
+  /** Same content the editor passes to `buildSection` when inserting. */
+  presetInput?: PresetInput;
 }
 
-export function AddPanel({ onAddSection, onAddComponent }: AddPanelProps) {
+export function AddPanel({
+  onAddSection,
+  onAddComponent,
+  previewCtx,
+  presetInput,
+}: AddPanelProps) {
   const [tab, setTab] = useState<"sections" | "components">("sections");
   const [search, setSearch] = useState("");
+  const [view, setView] = useState<"preview" | "list">("preview");
+
+  // Read the stored preference after mount rather than during state init, so
+  // the server and first client render agree (no hydration mismatch).
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(VIEW_STORAGE_KEY);
+      if (stored === "preview" || stored === "list") setView(stored);
+    } catch {
+      // Private browsing can throw on localStorage; the default is fine.
+    }
+  }, []);
+
+  const setViewPersisted = (next: "preview" | "list") => {
+    setView(next);
+    try {
+      window.localStorage.setItem(VIEW_STORAGE_KEY, next);
+    } catch {
+      // Not worth surfacing — the choice just won't persist.
+    }
+  };
+
+  const canPreview = Boolean(previewCtx) && view === "preview";
 
   const term = search.trim().toLowerCase();
 
@@ -82,15 +122,32 @@ export function AddPanel({ onAddSection, onAddComponent }: AddPanelProps) {
             </button>
           ))}
         </div>
-        <div className="relative">
-          <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={tab === "sections" ? "Search sections" : "Search components"}
-            className="w-full rounded-md border border-slate-200 py-1.5 pl-7 pr-2 text-xs focus:border-blue-500 focus:outline-none"
-          />
+        <div className="flex items-center gap-1.5">
+          <div className="relative flex-1">
+            <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={tab === "sections" ? "Search sections" : "Search components"}
+              className="w-full rounded-md border border-slate-200 py-1.5 pl-7 pr-2 text-xs focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          {tab === "sections" && previewCtx && (
+            <button
+              type="button"
+              onClick={() => setViewPersisted(view === "preview" ? "list" : "preview")}
+              title={view === "preview" ? "Show as a compact list" : "Show previews"}
+              aria-label={view === "preview" ? "Show as a compact list" : "Show previews"}
+              className="shrink-0 rounded-md border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50 hover:text-slate-700"
+            >
+              {view === "preview" ? (
+                <List className="h-3.5 w-3.5" />
+              ) : (
+                <LayoutGrid className="h-3.5 w-3.5" />
+              )}
+            </button>
+          )}
         </div>
       </div>
 
@@ -109,7 +166,14 @@ export function AddPanel({ onAddSection, onAddComponent }: AddPanelProps) {
                 </h4>
                 <div className="space-y-1">
                   {group.items.map((preset) => (
-                    <SectionCard key={preset.key} preset={preset} onAdd={onAddSection} />
+                    <SectionCard
+                      key={preset.key}
+                      preset={preset}
+                      onAdd={onAddSection}
+                      {...(canPreview && previewCtx
+                        ? { previewCtx, presetInput: presetInput ?? {} }
+                        : {})}
+                    />
                   ))}
                 </div>
               </div>
@@ -138,22 +202,55 @@ export function AddPanel({ onAddSection, onAddComponent }: AddPanelProps) {
 function SectionCard({
   preset,
   onAdd,
+  previewCtx,
+  presetInput,
 }: {
   preset: SectionPreset;
   onAdd: (key: string) => void;
+  previewCtx?: SectionPreviewContext;
+  presetInput?: PresetInput;
 }) {
   const Icon = resolveIcon(preset.icon);
+  const showPreview = Boolean(previewCtx && presetInput);
+
   return (
     <button
       type="button"
+      title={preset.description}
       onClick={() => onAdd(preset.key)}
-      className="flex w-full items-start gap-2 rounded-md border border-slate-200 px-2 py-2 text-left transition-colors hover:border-blue-300 hover:bg-blue-50"
+      className={cn(
+        "w-full rounded-md border border-slate-200 text-left transition-colors hover:border-blue-300 hover:bg-blue-50",
+        showPreview ? "overflow-hidden p-0" : "flex items-start gap-2 px-2 py-2",
+      )}
     >
-      <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-600" />
-      <span className="min-w-0">
-        <span className="block text-[11px] font-medium text-slate-800">{preset.label}</span>
-        <span className="block text-[10px] leading-snug text-slate-500">{preset.description}</span>
-      </span>
+      {showPreview && previewCtx ? (
+        <>
+          <SectionPreview
+            presetKey={preset.key}
+            baseCtx={previewCtx}
+            presetInput={presetInput ?? {}}
+          />
+          <span className="flex items-start gap-1.5 border-t border-slate-100 px-2 py-1.5">
+            <Icon className="mt-0.5 h-3 w-3 shrink-0 text-blue-600" />
+            <span className="min-w-0">
+              <span className="block text-[11px] font-medium text-slate-800">{preset.label}</span>
+              <span className="block text-[10px] leading-snug text-slate-500">
+                {preset.description}
+              </span>
+            </span>
+          </span>
+        </>
+      ) : (
+        <>
+          <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-600" />
+          <span className="min-w-0">
+            <span className="block text-[11px] font-medium text-slate-800">{preset.label}</span>
+            <span className="block text-[10px] leading-snug text-slate-500">
+              {preset.description}
+            </span>
+          </span>
+        </>
+      )}
     </button>
   );
 }

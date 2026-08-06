@@ -35,6 +35,7 @@ import {
   ZoomIn,
   ZoomOut,
   Keyboard,
+  HelpCircle,
   Maximize2,
 } from "lucide-react";
 import {
@@ -65,6 +66,7 @@ import { ThemePanel } from "./ThemePanel";
 import { AuditPanel } from "./AuditPanel";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { NewPageDialog } from "./NewPageDialog";
+import { GuidedTour, type TourStep } from "./GuidedTour";
 
 export interface BuilderShellProps {
   site: SiteDetailDto;
@@ -94,6 +96,10 @@ const BREAKPOINT_WIDTH: Record<Breakpoint, number> = {
   mobile: 390,
 };
 
+const TOUR_STORAGE_KEY = "sb:builder:tour-seen";
+/** Bump to re-show the tour after a significant change to the editor. */
+const TOUR_VERSION = "1";
+
 export function BuilderShell({ site: initialSite, page: initialPage, renderData }: BuilderShellProps) {
   const [site, setSite] = useState(initialSite);
   const [page, setPage] = useState(initialPage);
@@ -108,6 +114,7 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
   const [switchingPage, setSwitchingPage] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newPageOpen, setNewPageOpen] = useState(false);
+  const [tourOpen, setTourOpen] = useState(false);
   /** Prompt queued by the audit panel for the AI chat to pick up. */
   const [queuedPrompt, setQueuedPrompt] = useState<string | null>(null);
   /** Forms available to point a Form block at, loaded once for the inspector. */
@@ -237,6 +244,84 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
   }, [stepZoom, fitZoom]);
 
   // -----------------------------------------------------------------
+  // First-run tour
+  // -----------------------------------------------------------------
+
+  /**
+   * Steps live here rather than inside the tour because each one may need to
+   * reveal what it points at — opening the Add panel, switching the right rail
+   * to the AI tab — and this component owns that state.
+   *
+   * Bumping TOUR_VERSION re-shows the tour to everyone, which is the intended
+   * way to reintroduce it after a significant editor change.
+   */
+  const tourSteps = useMemo<TourStep[]>(
+    () => [
+      {
+        id: "add",
+        title: "Add sections here",
+        body: "Every block your site can have, previewed in your own colours. Click one to drop it onto the page.",
+        target: '[data-tour="left-rail"]',
+        placement: "right",
+        onEnter: () => setLeftTab("add"),
+      },
+      {
+        id: "canvas",
+        title: "Edit right on the page",
+        body: "Click anything to select it. Double-click text to type over it. There is no separate preview to switch to — this is the page.",
+        target: '[data-tour="canvas"]',
+        placement: "right",
+      },
+      {
+        id: "inspector",
+        title: "Fine-tune what you picked",
+        body: "With something selected, this panel changes its text, colours, spacing, and images. The Theme tab restyles the whole site at once.",
+        target: '[data-tour="right-rail"]',
+        placement: "left",
+        onEnter: () => setRightTab("design"),
+      },
+      {
+        id: "ai",
+        title: "Or just ask",
+        body: "Describe the change in plain words — \"make the hero warmer\", \"add a pricing section\" — and it happens. Every change can be undone with Ctrl+Z.",
+        target: '[data-tour="right-rail"]',
+        placement: "left",
+        onEnter: () => setRightTab("ai"),
+      },
+      {
+        id: "publish",
+        title: "Publish when you are ready",
+        body: "Your edits save automatically as a draft. Nothing is public until you press Publish. Press ? any time for keyboard shortcuts.",
+        target: '[data-tour="publish"]',
+        placement: "bottom",
+      },
+    ],
+    [],
+  );
+
+  // Auto-start once per browser. Read in an effect, never during render, so
+  // the server and client agree on the first paint.
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(TOUR_STORAGE_KEY) !== TOUR_VERSION) {
+        setTourOpen(true);
+      }
+    } catch {
+      // Storage blocked (private mode): skip the tour rather than show it on
+      // every single visit, which would be worse than not showing it at all.
+    }
+  }, []);
+
+  const closeTour = useCallback(() => {
+    setTourOpen(false);
+    try {
+      window.localStorage.setItem(TOUR_STORAGE_KEY, TOUR_VERSION);
+    } catch {
+      // Not persisting is acceptable; the tour is dismissed for this session.
+    }
+  }, []);
+
+  // -----------------------------------------------------------------
   // Render context for the canvas
   // -----------------------------------------------------------------
 
@@ -257,6 +342,31 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
       previewBreakpoint: editor.breakpoint,
     }),
     [editor.document, editor.breakpoint, theme, site, renderData],
+  );
+
+  /**
+   * Context for the Add panel's section thumbnails.
+   *
+   * Separate from `ctx` on purpose. `ctx` carries the live document, so it is a
+   * new object on every edit — feeding that to the thumbnails would re-render
+   * all of them on every keystroke. This one changes only when the theme or
+   * site data does, and each preview supplies its own document.
+   */
+  const previewCtx = useMemo<Omit<RenderContext, "document">>(
+    () => ({
+      theme,
+      brand: site.brand,
+      pages: site.pages.map((p) => ({
+        id: p.id,
+        title: p.title,
+        path: p.path,
+        hiddenInNav: p.hiddenInNav,
+      })),
+      basePath: site.previewPath,
+      data: renderData,
+      editor: true,
+    }),
+    [theme, site, renderData],
   );
 
   // -----------------------------------------------------------------
@@ -487,12 +597,17 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
           Preview
         </a>
 
+        <ToolbarButton title="Show me around" onClick={() => setTourOpen(true)}>
+          <HelpCircle className="h-3.5 w-3.5" />
+        </ToolbarButton>
+
         <ToolbarButton title="Keyboard shortcuts (?)" onClick={() => setShortcutsOpen(true)}>
           <Keyboard className="h-3.5 w-3.5" />
         </ToolbarButton>
 
         <button
           type="button"
+          data-tour="publish"
           onClick={() => void publish()}
           disabled={publishing}
           className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
@@ -509,7 +624,10 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
       {/* ---------------- Body ---------------- */}
       <div className="flex min-h-0 flex-1">
         {/* Left rail */}
-        <aside className="flex w-64 shrink-0 flex-col border-r border-slate-200 bg-white">
+        <aside
+          data-tour="left-rail"
+          className="flex w-64 shrink-0 flex-col border-r border-slate-200 bg-white"
+        >
           <div className="flex shrink-0 border-b border-slate-200">
             {(
               [
@@ -541,6 +659,8 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
               <AddPanel
                 onAddSection={editor.addSection}
                 onAddComponent={(type) => editor.addComponent(type)}
+                previewCtx={previewCtx}
+                presetInput={presetInput}
               />
             )}
             {leftTab === "layers" && (
@@ -600,7 +720,10 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
         />
 
         {/* Right rail */}
-        <aside className="flex w-72 shrink-0 flex-col border-l border-slate-200 bg-white">
+        <aside
+          data-tour="right-rail"
+          className="flex w-72 shrink-0 flex-col border-l border-slate-200 bg-white"
+        >
           <div className="flex shrink-0 border-b border-slate-200">
             {(
               [
@@ -721,6 +844,8 @@ export function BuilderShell({ site: initialSite, page: initialPage, renderData 
       </div>
 
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+
+      <GuidedTour steps={tourSteps} open={tourOpen} onClose={closeTour} />
 
       {newPageOpen && (
         <NewPageDialog

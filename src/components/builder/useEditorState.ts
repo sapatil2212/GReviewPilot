@@ -682,6 +682,18 @@ export function useEditorState({
         return;
       }
 
+      /**
+       * Nor while a modal is open. A dialog owns Escape and the arrow keys
+       * while it is up, and without this the same keypress did two things at
+       * once — Escape closing the dialog *and* walking the selection up a
+       * level, arrows paging a tour *and* nudging the selected element.
+       * Matching on the ARIA contract rather than a registry of dialog names
+       * means new dialogs are covered automatically.
+       */
+      if (window.document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
+
       const mod = e.metaKey || e.ctrlKey;
 
       if (mod && e.key.toLowerCase() === "z") {

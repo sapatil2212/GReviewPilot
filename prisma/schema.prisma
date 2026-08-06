@@ -232,6 +232,77 @@ enum SentimentType {
   MIXED
 }
 
+// =========================================================
+// AI BUSINESS PERSONALITY
+//
+// Enums for the personality knowledge base. Single-choice settings are
+// enums (so the DB rejects nonsense and the UI can enumerate options),
+// while multi-select answers live in Json columns on BusinessPersonality.
+//
+// SentimentType above is deliberately NOT reused for reply targeting: it
+// has four values, and reply strategy needs to distinguish "negative" from
+// "very negative" (a 1-star rant is handled differently from a 3-star
+// grumble). ReplySentiment is that finer six-level scale, derived from
+// rating + SentimentType.
+// =========================================================
+
+enum ReplySentiment {
+  VERY_POSITIVE
+  POSITIVE
+  NEUTRAL
+  MIXED
+  NEGATIVE
+  VERY_NEGATIVE
+}
+
+/// How often replies may use emoji.
+enum EmojiUsage {
+  NEVER
+  RARELY
+  SOMETIMES
+  FREQUENTLY
+}
+
+/// Target length band for a generated reply.
+enum ReplyLength {
+  VERY_SHORT
+  SHORT
+  MEDIUM
+  DETAILED
+}
+
+/// Who may send a generated reply, and when.
+enum ReplyApprovalMode {
+  AUTO_SEND
+  DRAFT_ONLY
+  MANAGER_APPROVAL
+}
+
+/// How much the generator may vary wording. Maps to provider temperature
+/// later, but is stored as intent rather than a raw number.
+enum AiConfidenceLevel {
+  CONSERVATIVE
+  BALANCED
+  CREATIVE
+}
+
+/// Who gets thanked in a reply.
+enum AppreciationPolicy {
+  ALWAYS
+  POSITIVE_ONLY
+  NEVER
+}
+
+/// Lifecycle of a generated reply draft.
+enum ReplyDraftStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  SENT
+  REJECTED
+  DISCARDED
+}
+
 enum PostStatus {
   DRAFT
   SCHEDULED
@@ -434,6 +505,8 @@ model Tenant {
   qrScans             QrScan[]
   aiInsights          AiInsight[]
   sites               Site[]
+  aiPersonality       BusinessPersonality?
+  aiReplyDrafts       AiReplyDraft[]
 
   @@index([status])
   @@index([plan])
@@ -1129,10 +1202,11 @@ model Review {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  location Location?       @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  replies  ReviewReply[]
-  tags     ReviewTagLink[]
+  tenant     Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location   Location?       @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  replies    ReviewReply[]
+  tags       ReviewTagLink[]
+  aiDrafts   AiReplyDraft[]
 
   @@index([tenantId, status])
   @@index([tenantId, locationId])
@@ -1552,6 +1626,188 @@ model AiInsight {
   @@unique([tenantId, kind, locationId, periodDays])
   @@index([tenantId, kind])
   @@index([tenantId, generatedAt])
+}
+
+// =========================================================
+// AI BUSINESS PERSONALITY (the knowledge base)
+//
+// One row per tenant. Captured once during onboarding, then reused by
+// EVERY AI feature — review replies, Google posts, business descriptions,
+// FAQs, email campaigns, social captions — so a business describes itself
+// once instead of re-prompting per feature.
+//
+// Stored as discrete, typed sections rather than one blob of prompt text.
+// That is the central design decision: a single stored prompt string
+// cannot be validated, partially edited, diffed, versioned, or reused by a
+// feature that needs only the tone rules. Structured columns can. The
+// prompt is COMPOSED from these fields at call time
+// (src/server/ai/promptBuilder.ts) and never persisted.
+//
+// Multi-select answers are Json string[] because they are read as a whole
+// set and never queried individually; a join table per list would add six
+// tables for no query we actually run.
+// =========================================================
+
+model BusinessPersonality {
+  id       String @id @default(cuid())
+  tenantId String @unique
+
+  // ---------- Step 1: introduction ----------
+  // Denormalised from Tenant/BusinessProfile on purpose: this is the name
+  // and description the business wants to SPEAK as, which is not always
+  // its legal or listing name.
+  businessName     String?
+  businessType     String?
+  industry         String?
+  shortDescription String? @db.Text
+  uniqueness       String? @db.Text
+
+  // ---------- Step 2: values ----------
+  /// string[] — e.g. ["Honesty","Fast Service"]. Custom values allowed.
+  values Json?
+
+  // ---------- Step 3: communication style ----------
+  /// string[] — e.g. ["Friendly","Warm"]. Multiple allowed by design;
+  /// real brand voice is usually a blend, not one adjective.
+  communicationStyles Json?
+
+  // ---------- Steps 4-7: surface mechanics ----------
+  greetingStyle String?     @db.VarChar(120) // "Hi," / "Dear," / custom / empty = none
+  signature     String?     @db.VarChar(200) // "The ABC Dental Team" / empty = none
+  emojiUsage    EmojiUsage  @default(NEVER)
+  replyLength   ReplyLength @default(SHORT)
+
+  // ---------- Step 8: language ----------
+  primaryLanguage     String  @default("en") @db.VarChar(10) // BCP-47
+  /// string[] BCP-47
+  secondaryLanguages  Json?
+  autoDetectLanguage  Boolean @default(true)
+  translateBeforeReply Boolean @default(false)
+
+  // ---------- Step 9: appreciation ----------
+  appreciationPolicy  AppreciationPolicy @default(ALWAYS)
+  appreciationMessage String?            @db.Text
+
+  // ---------- Steps 10-11: reply strategy ----------
+  /// string[] of NegativeStrategy keys — see src/server/ai/personality.types.ts
+  negativeStrategies Json?
+  /// string[] of PositiveStrategy keys
+  positiveStrategies Json?
+
+  // ---------- Step 12: service knowledge ----------
+  /// string[]
+  services Json?
+  /// string[]
+  products Json?
+  pricingPhilosophy String? @db.Text
+  guarantees        String? @db.Text
+  usp               String? @db.Text
+  experience        String? @db.Text
+  /// string[]
+  certifications Json?
+  /// string[]
+  awards Json?
+  businessStory String? @db.Text
+
+  // ---------- Steps 13-14: guardrails ----------
+  /// string[] — hard "never say this" rules. Always injected into prompts
+  /// as prohibitions, and checked against generated output.
+  neverSay Json?
+  /// string[] — sector compliance notes (healthcare, financial, ...).
+  complianceRules Json?
+  /// Free-text regulatory context, e.g. "HIPAA: never confirm a patient
+  /// was treated here."
+  complianceNotes String? @db.Text
+
+  // ---------- Steps 15-16: automation ----------
+  approvalMode    ReplyApprovalMode @default(DRAFT_ONLY)
+  confidenceLevel AiConfidenceLevel @default(BALANCED)
+
+  // ---------- Onboarding progress ----------
+  /// string[] of completed step ids, so the wizard can resume and the UI
+  /// can show progress without inferring completeness from empty fields.
+  completedSteps Json?
+  completedAt    DateTime?
+  /// Bumped on every save. Lets a cached prompt or draft record which
+  /// personality revision produced it.
+  revision Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+// =========================================================
+// AI REPLY DRAFT
+//
+// One row per generated reply attempt. Carries the approval workflow, the
+// learning signal, and the analytics source of truth in a single table —
+// they are the same lifecycle viewed three ways:
+//
+//   approval   status transitions DRAFT -> PENDING_APPROVAL -> SENT
+//   learning   generatedText vs editedText is the correction signal
+//   analytics  counts and timestamps over the same rows
+//
+// `fingerprint` powers duplicate protection: a hash of the normalised
+// reply, unique per tenant, so the engine can reject an opening or phrasing
+// it has already sent. Nullable + non-unique index rather than a unique
+// constraint, because a legitimately identical short reply
+// ("Thank you, Priya!") must not hard-fail a send.
+// =========================================================
+
+model AiReplyDraft {
+  id       String @id @default(cuid())
+  tenantId String
+  reviewId String?
+
+  status ReplyDraftStatus @default(DRAFT)
+
+  /// What the engine produced, kept verbatim even after edits so the
+  /// difference remains measurable.
+  generatedText String  @db.Text
+  /// What a human changed it to, when they did.
+  editedText    String? @db.Text
+  /// Text actually sent, resolved at send time.
+  sentText      String? @db.Text
+
+  /// Sentiment band the reply was targeted at.
+  sentiment ReplySentiment?
+  /// Rating of the review being answered, denormalised for analytics.
+  starRating Int?
+  /// BCP-47 language the reply was written in.
+  language String? @db.VarChar(10)
+
+  /// "ai" | "template" — which path produced it.
+  source String @default("template")
+  /// BusinessPersonality.revision at generation time, so a reply can be
+  /// traced to the personality that wrote it.
+  personalityRevision Int?
+
+  /// sha256 of the normalised reply, for duplicate detection.
+  fingerprint String? @db.VarChar(64)
+  /// Normalised opening clause, so repeated openings can be avoided even
+  /// when the rest of the reply differs.
+  openingHash String? @db.VarChar(64)
+
+  generatedById String?
+  reviewedById  String?
+
+  requestedAt DateTime  @default(now())
+  reviewedAt  DateTime?
+  sentAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  review Review? @relation(fields: [reviewId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, fingerprint])
+  @@index([tenantId, openingHash])
+  @@index([reviewId])
 }
 
 // =========================================================

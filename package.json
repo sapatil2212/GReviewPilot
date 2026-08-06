@@ -16,6 +16,7 @@
     "db:seed:categories": "tsx prisma/seeds/categories.ts",
     "db:seed:templates": "tsx prisma/seeds/siteTemplates.ts",
     "verify:builder": "tsx scripts/verify-builder.ts",
+    "verify:ai": "tsx scripts/verify-ai-personality.ts",
     "verify:imagery": "tsx scripts/verify-imagery.mts",
     "verify:tls": "tsx scripts/verify-tls.mts",
     "verify:nginx": "tsx scripts/verify-nginx.mts",

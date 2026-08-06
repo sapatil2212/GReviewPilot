@@ -17,6 +17,7 @@ import { normalizeDocument } from "@/site/document/operations";
 import { coerceProps } from "@/site/registry/definitions";
 import type { SeoMeta, SiteDocument } from "@/site/document/types";
 import {
+  buildHtmlPageDocument,
   buildStarterDocument,
   pageDocument,
   siteBrand,
@@ -90,7 +91,14 @@ export const sitePageService = {
   async create(
     ctx: AuthContext,
     siteId: string,
-    input: { title: string; path: string; presets?: string[]; isHome: boolean; hiddenInNav: boolean },
+    input: {
+      title: string;
+      path: string;
+      presets?: string[];
+      html?: string;
+      isHome: boolean;
+      hiddenInNav: boolean;
+    },
     req?: Request,
   ) {
     const site = await siteRepository.findById(ctx.tenantId, siteId);
@@ -104,6 +112,20 @@ export const sitePageService = {
     const brand = siteBrand(site);
     const existing = await sitePageRepository.listMeta(site.id);
 
+    // A pasted landing page becomes a single sandboxed block that fills the
+    // page; otherwise the page is seeded from section presets (header + footer
+    // at minimum) so it stays consistent with the rest of the site.
+    const document = input.html?.trim()
+      ? buildHtmlPageDocument(input.html, input.title)
+      : buildStarterDocument(input.presets?.length ? input.presets : ["navbar", "footer"], {
+          businessName: brand.businessName,
+          phone: brand.phone,
+          whatsapp: brand.whatsapp,
+          email: brand.email,
+          address: brand.address,
+          title: input.title,
+        });
+
     const page = await sitePageRepository.create({
       siteId: site.id,
       tenantId: ctx.tenantId,
@@ -111,18 +133,7 @@ export const sitePageService = {
       path,
       hiddenInNav: input.hiddenInNav,
       sortOrder: existing.length,
-      // A new page starts with header and footer so it is consistent with the
-      // rest of the site without the author rebuilding chrome each time.
-      document: toJson(
-        buildStarterDocument(input.presets?.length ? input.presets : ["navbar", "footer"], {
-          businessName: brand.businessName,
-          phone: brand.phone,
-          whatsapp: brand.whatsapp,
-          email: brand.email,
-          address: brand.address,
-          title: input.title,
-        }),
-      ),
+      document: toJson(document),
     });
 
     if (input.isHome) await sitePageRepository.setHome(site.id, page.id);

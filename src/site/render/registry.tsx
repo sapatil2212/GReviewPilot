@@ -20,6 +20,7 @@ import {
   Carousel,
   Container,
   Divider,
+  EmbeddedPage,
   Grid,
   Heading,
   HtmlEmbed,
@@ -85,6 +86,7 @@ export const RENDERERS: Record<string, SiteComponent> = {
   CollectionList,
   // Advanced
   HtmlEmbed,
+  EmbeddedPage,
 };
 
 /** Definition types with no React implementation. Should always be empty. */

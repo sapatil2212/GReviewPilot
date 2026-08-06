@@ -1140,6 +1140,46 @@ export const COMPONENTS: ComponentDefinition[] = [
       },
     ],
   }),
+
+  def({
+    type: "EmbeddedPage",
+    label: "Pasted landing page",
+    category: "advanced",
+    icon: "FileCode",
+    description:
+      "A complete landing page pasted as HTML/CSS/JS, rendered in an isolated, sandboxed frame.",
+    isContainer: false,
+    // Unlike HtmlEmbed (which strips styles/scripts and injects markup inline),
+    // this renders the pasted code inside a sandboxed iframe. That preserves a
+    // full landing page's styling and behaviour while keeping its scripts
+    // walled off from the rest of the site — no access to cookies, storage, or
+    // the parent DOM. The larger cap reflects that a whole page, not a block,
+    // is expected here.
+    schema: z.object({
+      html: z.string().max(300_000).default(""),
+      title: z.string().max(200).default("Embedded page"),
+      minHeight: z.coerce.number().int().min(100).max(20_000).default(600),
+    }),
+    defaultProps: { html: "", title: "Embedded page", minHeight: 600 },
+    propFields: [
+      {
+        key: "html",
+        label: "Landing page code",
+        kind: "textarea",
+        placeholder: "Paste your full HTML here…",
+        help: "Paste a complete landing page. Its CSS and JavaScript run inside a secure sandbox, isolated from the rest of your site.",
+      },
+      {
+        key: "minHeight",
+        label: "Minimum height (px)",
+        kind: "number",
+        min: 100,
+        max: 20_000,
+        help: "The frame grows to fit its content; this is the smallest it can be.",
+      },
+      { key: "title", label: "Accessible title", kind: "text" },
+    ],
+  }),
 ];
 
 // =====================================================================

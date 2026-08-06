@@ -26,7 +26,13 @@ import {
   parsePagination,
   type PagedResult,
 } from "@/server/utils/pagination";
-import { createEmptyDocument, insertSubtree, normalizeDocument } from "@/site/document/operations";
+import {
+  createEmptyDocument,
+  createNode,
+  createNodeId,
+  insertSubtree,
+  normalizeDocument,
+} from "@/site/document/operations";
 import { applyStyleKeyword, createTheme, readableOn } from "@/site/document/theme";
 import { buildSection } from "@/site/registry/presets";
 import type {
@@ -807,6 +813,23 @@ export function buildStarterDocument(
     if (!subtree) continue;
     document = insertSubtree(document, document.root, subtree.nodes, subtree.rootId, -1);
   }
+  return normalizeDocument(document);
+}
+
+/**
+ * Build a page document from a pasted landing page. The whole page is a single
+ * sandboxed `EmbeddedPage` block, so a user can drop in a design built
+ * elsewhere and keep editing everything else around it.
+ */
+export function buildHtmlPageDocument(html: string, title: string): SiteDocument {
+  let document = createEmptyDocument();
+  const id = createNodeId();
+  const node = createNode(
+    "EmbeddedPage",
+    { props: { html, title, minHeight: 600 }, children: [] },
+    id,
+  );
+  document = insertSubtree(document, document.root, { [id]: node }, id, -1);
   return normalizeDocument(document);
 }
 

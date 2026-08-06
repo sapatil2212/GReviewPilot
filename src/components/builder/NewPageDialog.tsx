@@ -40,7 +40,16 @@ const LAYOUTS: Array<{ id: string; label: string; hint: string; presets: string[
     hint: "Header, contact form, map, footer.",
     presets: ["navbar", "contact", "map", "footer"],
   },
+  {
+    id: "paste",
+    label: "Paste landing page code",
+    hint: "Bring a design you already have. Its CSS and JS run in a secure sandbox.",
+    presets: [],
+  },
 ];
+
+/** The layout id that swaps the preset picker for a code textarea. */
+const PASTE_LAYOUT = "paste";
 
 /** Mirrors the server's slug rules so the preview matches what gets saved. */
 export function toPagePath(title: string): string {
@@ -60,7 +69,12 @@ export function NewPageDialog({
   /** Used to catch a duplicate URL before spending a round trip on it. */
   existingPaths: string[];
   onClose: () => void;
-  onCreate: (input: { title: string; path: string; presets: string[] }) => Promise<void>;
+  onCreate: (input: {
+    title: string;
+    path: string;
+    presets: string[];
+    html?: string;
+  }) => Promise<void>;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [title, setTitle] = useState("");
@@ -68,7 +82,10 @@ export function NewPageDialog({
   /** Once the user edits the URL we stop overwriting it from the title. */
   const [pathEdited, setPathEdited] = useState(false);
   const [layout, setLayout] = useState(LAYOUTS[0].id);
+  const [html, setHtml] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const pasting = layout === PASTE_LAYOUT;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -91,7 +108,8 @@ export function NewPageDialog({
     return null;
   }, [title, effectivePath, existingPaths]);
 
-  const canSubmit = title.trim().length > 0 && !error && !busy;
+  const canSubmit =
+    title.trim().length > 0 && !error && !busy && (!pasting || html.trim().length > 0);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,6 +120,7 @@ export function NewPageDialog({
         title: title.trim(),
         path: effectivePath,
         presets: LAYOUTS.find((l) => l.id === layout)?.presets ?? ["navbar", "footer"],
+        ...(pasting && html.trim() ? { html } : {}),
       });
       // The caller closes on success so the dialog stays up if creation failed.
     } finally {
@@ -118,7 +137,10 @@ export function NewPageDialog({
     >
       <form
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl"
+        className={cn(
+          "max-h-[90vh] w-full overflow-y-auto rounded-2xl bg-white p-5 shadow-xl transition-[max-width]",
+          pasting ? "max-w-2xl" : "max-w-md",
+        )}
       >
         <div className="flex items-start justify-between gap-3">
           <h2
@@ -214,6 +236,28 @@ export function NewPageDialog({
             ))}
           </div>
         </fieldset>
+
+        {pasting && (
+          <label className="mt-3 block">
+            <span className="mb-1 block text-xs font-medium text-slate-700">
+              Landing page code
+            </span>
+            <textarea
+              required
+              value={html}
+              onChange={(e) => setHtml(e.target.value)}
+              rows={10}
+              spellCheck={false}
+              placeholder={"<!doctype html>\n<html>\n  <head><style>/* your CSS */</style></head>\n  <body>…</body>\n</html>"}
+              className="w-full resize-y rounded-lg border border-slate-200 px-3 py-2 font-mono text-[11px] leading-relaxed focus:border-blue-500 focus:outline-none"
+            />
+            <span className="mt-1 block text-[11px] leading-snug text-slate-400">
+              Paste a full HTML page or a fragment. Styles and scripts are kept and run inside a
+              sandboxed frame, isolated from the rest of your site. You can replace or edit the
+              code later from the block&apos;s settings.
+            </span>
+          </label>
+        )}
 
         <div className="mt-4 flex items-center justify-end gap-2">
           <button

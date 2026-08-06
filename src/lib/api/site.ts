@@ -418,7 +418,15 @@ export const siteApi = {
 
   createPage(
     siteId: string,
-    input: { title: string; path: string; presets?: string[]; isHome?: boolean; hiddenInNav?: boolean },
+    input: {
+      title: string;
+      path: string;
+      presets?: string[];
+      /** Pasted landing page HTML. Takes precedence over `presets`. */
+      html?: string;
+      isHome?: boolean;
+      hiddenInNav?: boolean;
+    },
   ) {
     return apiFetch<{ id: string; title: string; path: string; isHome: boolean }>(
       `${base}/${siteId}/pages`,

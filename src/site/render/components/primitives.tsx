@@ -848,6 +848,100 @@ export const HtmlEmbed: SiteComponent = ({ node, attrs }) => (
   />
 );
 
+/**
+ * A whole landing page pasted as HTML/CSS/JS.
+ *
+ * Rendered inside a sandboxed iframe rather than injected into the page like
+ * HtmlEmbed. That is the entire point: a pasted landing page keeps its own
+ * <style> blocks, layout, and scripts intact, which the inline sanitizer would
+ * otherwise strip. The `sandbox` attribute (allow-scripts WITHOUT
+ * allow-same-origin) gives the frame a unique opaque origin, so its scripts
+ * cannot read the site's cookies, localStorage, or DOM — the code runs, but
+ * walled off.
+ *
+ * Height is not knowable up front, so the frame reports its own content height
+ * back over postMessage (a tiny script injected into the srcDoc) and this
+ * component grows to match. In the editor a transparent overlay sits on top so
+ * clicks select the node instead of interacting with the embedded page.
+ */
+function buildEmbedSrcDoc(html: string): string {
+  const resize =
+    "<script>(function(){function p(){try{var b=document.body,d=document.documentElement,h=Math.max(b?b.scrollHeight:0,b?b.offsetHeight:0,d.scrollHeight,d.offsetHeight);parent.postMessage({type:'sb-embed-height',height:h},'*');}catch(e){}}window.addEventListener('load',p);window.addEventListener('resize',p);if(window.ResizeObserver){try{new ResizeObserver(p).observe(document.documentElement);}catch(e){}}setTimeout(p,200);setTimeout(p,800);setTimeout(p,2000);})();<\/script>";
+  const isFullDoc = /<html[\s>]|<!doctype/i.test(html);
+  if (isFullDoc) {
+    if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${resize}</body>`);
+    if (/<\/html>/i.test(html)) return html.replace(/<\/html>/i, `${resize}</html>`);
+    return html + resize;
+  }
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;padding:0}</style></head><body>${html}${resize}</body></html>`;
+}
+
+export const EmbeddedPage: SiteComponent = ({ node, attrs, ctx }) => {
+  const html = String(node.props.html ?? "");
+  const minHeight = Number(node.props.minHeight ?? 600);
+  const title = String(node.props.title ?? "Embedded page");
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState(minHeight);
+
+  const srcDoc = useMemo(() => (html.trim() ? buildEmbedSrcDoc(html) : ""), [html]);
+
+  useEffect(() => {
+    function onMessage(e: MessageEvent) {
+      if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return;
+      const data = e.data as { type?: string; height?: number } | null;
+      if (data && data.type === "sb-embed-height" && typeof data.height === "number") {
+        setHeight(Math.max(minHeight, Math.ceil(data.height)));
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [minHeight]);
+
+  if (!html.trim()) {
+    return (
+      <div
+        {...attrs}
+        style={{
+          ...attrs.style,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minHeight: `${minHeight}px`,
+          background: "var(--sb-color-muted)",
+          color: "var(--sb-color-muted-foreground)",
+          fontSize: "var(--sb-text-sm)",
+        }}
+      >
+        {ctx.editor ? "Paste your landing page code in the panel on the right" : ""}
+      </div>
+    );
+  }
+
+  return (
+    <div {...attrs} style={{ ...attrs.style, position: "relative" }}>
+      <iframe
+        ref={iframeRef}
+        title={title}
+        srcDoc={srcDoc}
+        // No allow-same-origin: scripts run but cannot touch the parent site.
+        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
+        loading="lazy"
+        style={{
+          width: "100%",
+          height: `${height}px`,
+          border: "none",
+          display: "block",
+        }}
+      />
+      {ctx.editor && (
+        // Swallow pointer events so the builder can select/move the block
+        // rather than the click landing inside the embedded page.
+        <div style={{ position: "absolute", inset: 0, cursor: "default" }} aria-hidden />
+      )}
+    </div>
+  );
+};
+
 export const SocialLinks: SiteComponent = ({ node, attrs, ctx }) => {
   const links =
     (node.props.links as Array<{ platform: string; url: string }>) ??

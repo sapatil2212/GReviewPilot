@@ -447,6 +447,12 @@ export const createPageSchema = z.object({
   path: pagePathSchema,
   /** Seed the page from a list of section presets. */
   presets: z.array(z.enum(PRESET_KEYS as [string, ...string[]])).max(20).optional(),
+  /**
+   * Seed the page from a pasted landing page instead of presets. When present,
+   * the whole page becomes a single sandboxed EmbeddedPage block. Takes
+   * precedence over `presets`.
+   */
+  html: z.string().max(300_000).optional(),
   isHome: z.boolean().default(false),
   hiddenInNav: z.boolean().default(false),
 });

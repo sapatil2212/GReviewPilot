@@ -26,7 +26,8 @@
     "smoke:builder": "tsx scripts/smoke-builder.mts",
     "smoke:domain": "tsx scripts/smoke-domain.mts",
     "smoke:subdomain": "tsx scripts/smoke-subdomain.mts",
-    "smoke:template": "tsx scripts/smoke-template.mts"
+    "smoke:template": "tsx scripts/smoke-template.mts",
+    "smoke:ai": "tsx scripts/smoke-ai-personality.mts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",

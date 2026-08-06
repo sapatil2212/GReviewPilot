@@ -30,6 +30,7 @@ import {
   isPublishable,
   openingFingerprint,
   similarity,
+  splitSentences,
 } from "../src/server/ai/humanize";
 import { buildBusinessContext, buildReplyPrompt } from "../src/server/ai/promptBuilder";
 
@@ -417,6 +418,140 @@ check("baseline guardrails always present", emptyPrompt.prompt.includes("Never i
 const reusable = buildBusinessContext(knowledge);
 check("reusable business context builds", reusable.prompt.includes("Bright Smile Dental"));
 check("reusable context omits reply-only sections", !reusable.sections.some((s) => s.id === "goals"));
+
+// ---------------------------------------------------------------------
+section("Approval routing");
+
+const { resolveInitialStatus } = await import("../src/server/services/aiReplyEngine.service");
+
+check(
+  "auto-send approves routine praise",
+  resolveInitialStatus({ approvalMode: "AUTO_SEND", escalated: false, blocked: false }) === "APPROVED",
+);
+check(
+  "draft-only stays a draft",
+  resolveInitialStatus({ approvalMode: "DRAFT_ONLY", escalated: false, blocked: false }) === "DRAFT",
+);
+check(
+  "manager approval queues",
+  resolveInitialStatus({ approvalMode: "MANAGER_APPROVAL", escalated: false, blocked: false }) ===
+    "PENDING_APPROVAL",
+);
+check(
+  "escalation overrides auto-send",
+  resolveInitialStatus({ approvalMode: "AUTO_SEND", escalated: true, blocked: false }) ===
+    "PENDING_APPROVAL",
+);
+check(
+  "a blocking issue overrides auto-send",
+  resolveInitialStatus({ approvalMode: "AUTO_SEND", escalated: false, blocked: true }) ===
+    "PENDING_APPROVAL",
+);
+
+// ---------------------------------------------------------------------
+section("Deterministic composer");
+
+const { composeDeterministicReply } = await import("../src/server/ai/deterministicReply");
+
+const praise = composeDeterministicReply({
+  knowledge,
+  sentiment: "VERY_POSITIVE",
+  review: { reviewerName: "Priya Sharma", starRating: 5, comment: "Painless and quick!" },
+});
+check("composes a reply", praise.length > 40);
+check("uses the greeting with the first name", praise.startsWith("Hi Priya,"));
+check("appends the signature", praise.includes("The Bright Smile Team"));
+check("respects emojiUsage NEVER", !/\p{Extended_Pictographic}/u.test(praise));
+check(
+  "praise reply has no apology",
+  !praise.toLowerCase().includes("sorry"),
+);
+check(
+  "output passes its own humanization rules",
+  isPublishable(
+    inspectReply({
+      text: praise,
+      minSentences: 1,
+      maxSentences: 8,
+      neverSay: knowledge.restrictions.neverSay,
+    }),
+  ),
+  praise,
+);
+
+const rant = composeDeterministicReply({
+  knowledge,
+  sentiment: "VERY_NEGATIVE",
+  review: { reviewerName: "Tom", starRating: 1, comment: "Rude staff, long wait." },
+});
+check("apology leads a negative reply", /^hi tom, (we're|we owe)/i.test(rant), rant);
+check("negative reply offers a route offline", /touch|contact|reach out|right|make it up/i.test(rant));
+check("negative reply never invites them back", !/welcome you back|see you again/i.test(rant));
+
+// Variants must differ, or "regenerate" is a no-op.
+const v1 = composeDeterministicReply({ knowledge, sentiment: "POSITIVE", review: { starRating: 4, comment: "Good" }, variant: 1 });
+const v2 = composeDeterministicReply({ knowledge, sentiment: "POSITIVE", review: { starRating: 4, comment: "Good" }, variant: 2 });
+check("regenerating produces different wording", v1 !== v2, `${v1} == ${v2}`);
+check(
+  "the same input and variant is stable",
+  composeDeterministicReply({ knowledge, sentiment: "POSITIVE", review: { starRating: 4, comment: "Good" }, variant: 1 }) === v1,
+);
+// Different reviews should not collide.
+const a = composeDeterministicReply({ knowledge, sentiment: "VERY_POSITIVE", review: { starRating: 5, comment: "Fantastic hygienist" } });
+const b = composeDeterministicReply({ knowledge, sentiment: "VERY_POSITIVE", review: { starRating: 5, comment: "Braces went perfectly" } });
+check("different reviews get different replies", a !== b);
+
+// Settings must actually take effect.
+const noGreeting = composeDeterministicReply({
+  knowledge: { ...knowledge, voice: { ...knowledge.voice, greetingStyle: null, signature: null } },
+  sentiment: "VERY_POSITIVE",
+  review: { reviewerName: "Priya", starRating: 5 },
+});
+check("no greeting is honoured", !noGreeting.startsWith("Hi"));
+// Asserts on the signature block specifically. An em-dash alone is not a
+// signal: some clause pools legitimately contain one mid-sentence.
+check("no signature is honoured", !noGreeting.includes("Bright Smile Team") && !noGreeting.includes("\n\n—"));
+
+const emoji = composeDeterministicReply({
+  knowledge: { ...knowledge, voice: { ...knowledge.voice, emojiUsage: "FREQUENTLY" } },
+  sentiment: "VERY_POSITIVE",
+  review: { starRating: 5 },
+});
+check("emoji policy FREQUENTLY adds one", /\p{Extended_Pictographic}/u.test(emoji));
+const emojiNegative = composeDeterministicReply({
+  knowledge: { ...knowledge, voice: { ...knowledge.voice, emojiUsage: "FREQUENTLY" } },
+  sentiment: "VERY_NEGATIVE",
+  review: { starRating: 1, comment: "Awful" },
+});
+check("never emoji in an apology", !/\p{Extended_Pictographic}/u.test(emojiNegative));
+
+const veryShort = composeDeterministicReply({
+  knowledge: { ...knowledge, voice: { ...knowledge.voice, replyLength: "VERY_SHORT" } },
+  sentiment: "VERY_POSITIVE",
+  review: { starRating: 5 },
+});
+check("VERY_SHORT yields one sentence", splitSentences(veryShort.split("\n")[0]!).length === 1, veryShort);
+
+const noThanks = composeDeterministicReply({
+  knowledge: {
+    ...knowledge,
+    replyBehaviour: { ...knowledge.replyBehaviour, appreciationPolicy: "NEVER" },
+  },
+  sentiment: "VERY_POSITIVE",
+  review: { starRating: 5 },
+});
+check("appreciation NEVER suppresses thanks", !/thank|thanks|appreciate/i.test(noThanks), noThanks);
+
+// Every band must produce something publishable.
+for (const s of ["VERY_POSITIVE", "POSITIVE", "NEUTRAL", "MIXED", "NEGATIVE", "VERY_NEGATIVE"] as const) {
+  const out = composeDeterministicReply({ knowledge, sentiment: s, review: { starRating: 3, comment: "Mixed bag" } });
+  check(
+    `${s} composes publishable text`,
+    out.trim().length > 20 &&
+      isPublishable(inspectReply({ text: out, minSentences: 1, maxSentences: 10, neverSay: knowledge.restrictions.neverSay })),
+    out,
+  );
+}
 
 // ---------------------------------------------------------------------
 console.log(`\n${checks - failures}/${checks} checks passed`);

@@ -241,6 +241,44 @@ export const PERMISSIONS = {
     UserRole.MANAGER,
   ],
 
+  // AI Business Personality
+  //
+  // Reading the personality is broad (STAFF draft replies and need to see the
+  // rules they are working within), but editing it is not: it is the brand
+  // voice for every AI feature at once, so a bad edit is workspace-wide.
+  "ai:personality:read": [
+    UserRole.SUPER_ADMIN,
+    UserRole.TENANT_OWNER,
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.STAFF,
+    UserRole.VIEWER,
+  ],
+  "ai:personality:update": [
+    UserRole.SUPER_ADMIN,
+    UserRole.TENANT_OWNER,
+    UserRole.ADMIN,
+  ],
+  /** Generate or preview a draft. Same audience as review:reply. */
+  "ai:reply:generate": [
+    UserRole.SUPER_ADMIN,
+    UserRole.TENANT_OWNER,
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.STAFF,
+  ],
+  /**
+   * Approve someone else's draft for sending. Excludes STAFF on purpose —
+   * MANAGER_APPROVAL mode is meaningless if the author can approve their own
+   * draft.
+   */
+  "ai:reply:approve": [
+    UserRole.SUPER_ADMIN,
+    UserRole.TENANT_OWNER,
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+  ],
+
   // Posts
   "post:read": [
     UserRole.SUPER_ADMIN,

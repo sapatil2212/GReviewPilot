@@ -567,12 +567,8 @@ export const reviewsApi = {
       "/api/private/reviews/analyze-sentiment",
       { method: "POST", body: JSON.stringify({ limit }) },
     ).then((r) => r.data),
-  /** AI-drafted owner reply for the reply box. */
-  suggestReply: (id: string, tone?: string) =>
-    apiFetch<{ text: string; source: "ai" | "template" }>(
-      `/api/private/reviews/${id}/suggest-reply`,
-      { method: "POST", body: JSON.stringify({ tone }) },
-    ).then((r) => r.data),
+  // AI reply drafting now lives in aiReplyApi (src/lib/api/ai.ts), which uses
+  // the Business Personality rather than a per-request tone argument.
   archive: (id: string) =>
     apiFetch(`/api/private/reviews/${id}/archive`, { method: "POST" }).then((r) => r.data),
   unarchive: (id: string) =>

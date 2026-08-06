@@ -9,25 +9,31 @@
  */
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
+  AlertTriangle,
   History,
   Loader2,
   Pencil,
+  ShieldAlert,
   Sparkles,
   Trash2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Select, Textarea } from "@/components/dashboard/field";
+import { Textarea } from "@/components/dashboard/field";
 import { reviewsApi, type ReviewDto } from "@/lib/api";
+import { aiReplyApi, type GeneratedDraftDto } from "@/lib/api/ai";
 
-const TONES = [
-  { value: "", label: "Auto tone" },
-  { value: "warm and appreciative", label: "Warm" },
-  { value: "professional", label: "Professional" },
-  { value: "apologetic", label: "Apologetic" },
-  { value: "friendly", label: "Friendly" },
-];
+/**
+ * There is deliberately no tone selector here any more.
+ *
+ * Tone used to be a per-reply dropdown, which meant the same business could
+ * sound warm on one review and formal on the next, and picking it was a decision
+ * on every single reply. It is now part of the Business Personality, configured
+ * once in AI Settings and applied to every AI feature — so this dialog just asks
+ * for a draft and gets one in the business's own voice.
+ */
 
 type Reply = ReviewDto["replies"][number];
 
@@ -48,7 +54,8 @@ export function ReplyDialog({
 
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [tone, setTone] = useState("");
+  /** Findings from the last draft, so guardrail problems are visible here too. */
+  const [draftInfo, setDraftInfo] = useState<GeneratedDraftDto | null>(null);
 
   const active = replies.find((r) => !r.deletedAt) ?? null;
   const history = replies.filter((r) => r.deletedAt);
@@ -79,14 +86,25 @@ export function ReplyDialog({
     await onChanged();
   }
 
+  /**
+   * Ask the personality engine for a draft.
+   *
+   * The engine persists an AiReplyDraft, which is what makes the approval
+   * queue, the learning signal, and the analytics work. The text is dropped
+   * into the box for editing exactly as before, so sending still goes through
+   * the normal reply path.
+   */
   async function runAi() {
     setGenerating(true);
     try {
-      const draft = await reviewsApi.suggestReply(review.id, tone || undefined);
+      const draft = await aiReplyApi.generate(review.id, Boolean(text.trim()));
       setText(draft.text);
-      toast.success(
-        draft.source === "ai" ? "AI draft ready — review and edit" : "Draft ready",
-      );
+      setDraftInfo(draft);
+      if (draft.escalated) {
+        toast.warning("This review needs a careful human answer — read the note below");
+      } else {
+        toast.success("Draft ready — review and edit before sending");
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Generation failed");
     } finally {
@@ -218,18 +236,6 @@ export function ReplyDialog({
                 {editingId ? "Edit reply" : active ? "Replace with a new reply" : "Write a reply"}
               </span>
               <div className="flex items-center gap-1.5">
-                <Select
-                  compact
-                  value={tone}
-                  onChange={(e) => setTone(e.target.value)}
-                  className="w-auto"
-                >
-                  {TONES.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </Select>
                 <button
                   onClick={runAi}
                   disabled={generating || busy}
@@ -241,7 +247,8 @@ export function ReplyDialog({
                     </>
                   ) : (
                     <>
-                      <Sparkles className="h-3 w-3" /> AI draft
+                      <Sparkles className="h-3 w-3" />
+                      {text.trim() ? "Try another" : "AI draft"}
                     </>
                   )}
                 </button>
@@ -254,9 +261,40 @@ export function ReplyDialog({
               placeholder="Write your reply, or let AI draft one for you…"
               maxLength={4096}
             />
-            <div className="mt-1 text-right text-[10px] text-slate-400">
-              {text.length}/4096
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <Link
+                href="/dashboard/ai-assistant"
+                className="text-[10px] text-slate-400 hover:text-blue-700 hover:underline"
+              >
+                Written in your business voice · change it
+              </Link>
+              <span className="text-[10px] text-slate-400">{text.length}/4096</span>
             </div>
+
+            {/* Engine findings, so a guardrail problem is visible before sending. */}
+            {draftInfo?.escalated && (
+              <div className="mt-2 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" />
+                <p className="text-[11px] text-red-900">
+                  <span className="font-semibold">Handle this one personally.</span> It mentions{" "}
+                  {draftInfo.escalationReasons.slice(0, 3).join(", ")}. Read the draft carefully
+                  before sending, and consider replying offline instead.
+                </p>
+              </div>
+            )}
+            {draftInfo?.issues
+              .filter((i) => i.severity === "block")
+              .map((issue, i) => (
+                <div
+                  key={i}
+                  className="mt-2 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+                >
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" />
+                  <p className="text-[11px] text-red-900">
+                    <span className="font-semibold">Cannot be sent as written:</span> {issue.detail}
+                  </p>
+                </div>
+              ))}
           </div>
 
           {/* History */}

@@ -28,7 +28,16 @@ export const googleAccountRepository = {
 
   findConnectedByTenantId(tenantId: string) {
     return prisma.googleAccount.findFirst({
-      where: { tenantId, status: GoogleAccountStatus.CONNECTED },
+      where: {
+        tenantId,
+        status: {
+          in: [
+            GoogleAccountStatus.CONNECTED,
+            GoogleAccountStatus.SYNCING,
+            GoogleAccountStatus.RATE_LIMITED,
+          ],
+        },
+      },
       include: INCLUDE,
       orderBy: { createdAt: "desc" },
     });
@@ -48,17 +57,51 @@ export const googleAccountRepository = {
     });
   },
 
+  /**
+   * `refreshToken` is optional on purpose. Google omits it when re-consenting
+   * an account that already has a grant, and overwriting a stored refresh
+   * token with an empty string would permanently break background sync for
+   * that tenant. On create it is required — the service guarantees one.
+   */
   upsert(input: {
     tenantId: string;
     email: string;
     accessToken: string;
-    refreshToken: string;
+    refreshToken?: string;
     expiresAt: Date;
     scopes: string;
     connectedById: string | null;
     googleAccountId?: string | null;
     googleAccountName?: string | null;
   }) {
+    if (!input.refreshToken) {
+      // Guard rather than silently create a row that can never refresh.
+      // findByTenantAndEmail in the service proves a token already exists,
+      // which means we are on the update branch.
+      return prisma.googleAccount.update({
+        where: {
+          tenantId_email: {
+            tenantId: input.tenantId,
+            email: input.email.toLowerCase(),
+          },
+        },
+        data: {
+          accessToken: input.accessToken,
+          expiresAt: input.expiresAt,
+          scopes: input.scopes,
+          status: GoogleAccountStatus.CONNECTED,
+          lastSyncError: null,
+          googleAccountId: input.googleAccountId ?? undefined,
+          googleAccountName: input.googleAccountName ?? undefined,
+          ...(input.connectedById
+            ? { connectedBy: { connect: { id: input.connectedById } } }
+            : {}),
+        },
+        include: INCLUDE,
+      });
+    }
+
+    const refreshToken = input.refreshToken;
     return prisma.googleAccount.upsert({
       where: {
         tenantId_email: {
@@ -70,7 +113,7 @@ export const googleAccountRepository = {
         tenant: { connect: { id: input.tenantId } },
         email: input.email.toLowerCase(),
         accessToken: input.accessToken,
-        refreshToken: input.refreshToken,
+        refreshToken,
         expiresAt: input.expiresAt,
         scopes: input.scopes,
         status: GoogleAccountStatus.CONNECTED,
@@ -82,10 +125,12 @@ export const googleAccountRepository = {
       },
       update: {
         accessToken: input.accessToken,
-        refreshToken: input.refreshToken,
+        refreshToken,
         expiresAt: input.expiresAt,
         scopes: input.scopes,
         status: GoogleAccountStatus.CONNECTED,
+        // A fresh grant clears whatever made the last one fail.
+        lastSyncError: null,
         googleAccountId: input.googleAccountId ?? undefined,
         googleAccountName: input.googleAccountName ?? undefined,
         ...(input.connectedById

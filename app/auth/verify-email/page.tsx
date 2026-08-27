@@ -95,10 +95,10 @@ function VerifyEmailContent() {
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-background">
-      <div className="pointer-events-none absolute inset-0 opacity-70">
-        <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-[#3B82F6]/25 blur-3xl" />
-        <div className="absolute top-40 -right-24 h-[28rem] w-[28rem] rounded-full bg-[#1D4ED8]/20 blur-3xl" />
-        <div className="absolute bottom-0 left-1/3 h-96 w-96 rounded-full bg-[#0F172A]/30 blur-3xl" />
+      <div className="pointer-events-none absolute inset-0 opacity-80">
+        <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-primary/20 blur-3xl animate-pulse-glow" />
+        <div className="absolute top-40 -right-24 h-[28rem] w-[28rem] rounded-full bg-secondary/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/3 h-96 w-96 rounded-full bg-accent/20 blur-3xl" />
       </div>
 
       <header className="absolute inset-x-0 top-0 z-20 flex items-center justify-between px-6 py-6 sm:px-10">
@@ -123,7 +123,7 @@ function VerifyEmailContent() {
 
       <div className="relative z-10 mx-auto flex min-h-screen max-w-md items-center justify-center px-4 pt-20 pb-12">
         <div className="w-full">
-          <div className="glass shadow-elevated rounded-3xl border border-border/60 bg-background/85 p-6 sm:p-8 backdrop-blur-xl text-center">
+          <div className="glass shadow-elevated rounded-3xl border border-border/80 bg-background/90 p-6 sm:p-8 backdrop-blur-2xl text-center">
             {token ? (
               <>
                 <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-surface">

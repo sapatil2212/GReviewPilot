@@ -75,7 +75,7 @@ export function Navbar() {
             href="/auth?mode=signup"
             className="group relative inline-flex items-center gap-1.5 overflow-hidden rounded-lg bg-foreground px-3.5 py-2 text-sm font-semibold text-background transition-transform hover:-translate-y-0.5"
           >
-            <span className="relative z-10">Sign up</span>
+            <span className="relative z-10">7 Day Free Trial</span>
             <span className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/30 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
           </Link>
         </div>
@@ -115,7 +115,7 @@ export function Navbar() {
                 onClick={() => setOpen(false)}
                 className="rounded-lg bg-foreground px-3 py-2 text-center text-sm font-semibold text-background"
               >
-                Sign up
+                7 Day Free Trial
               </Link>
             </div>
           </div>

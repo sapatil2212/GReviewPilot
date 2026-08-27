@@ -21,11 +21,27 @@ import { resolvePlace } from "./placeId.service";
 import { reviewContextService } from "@/server/services/reviewContext.service";
 import { extractRequestContext } from "@/server/middleware/requestContext";
 import { slugify } from "@/server/utils/tokens";
-import { ConflictError, NotFoundError, ValidationError } from "@/server/utils/errors";
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "@/server/utils/errors";
 import { logger } from "@/server/utils/logger";
 import { randomBytes } from "node:crypto";
 import type { AuthContext } from "@/server/auth/requireSession";
 import type { QuickConnectInput } from "@/server/validators/google.schema";
+
+function isQuickConnectLink(loc: {
+  googlePlaceId: string | null;
+  placeIdSource: string | null;
+  googleLocationId: string | null;
+}): boolean {
+  if (!loc.googlePlaceId) return false;
+  if (loc.placeIdSource === "manual") return true;
+  // Legacy Quick Connect rows had no placeIdSource; exclude Official OAuth links.
+  return loc.placeIdSource == null && loc.googleLocationId == null;
+}
 
 async function ensureUniqueSlug(tenantId: string, desired: string): Promise<string> {
   const base = slugify(desired);
@@ -113,7 +129,62 @@ export const quickConnectService = {
 
     await synthesizeContext(ctx, created.id, created.name, created.city, resolved.placeId, input);
     await recordAudit(ctx, req, resolved.placeId, created.id, resolved.verified);
+    
+    // Automatically trigger review sync for the newly connected location
+    const { googleReviewSyncService } = await import("./googleReviewSync.service");
+    void googleReviewSyncService.syncForTenant(ctx).catch((err) => {
+      logger.warn("Auto review sync failed after quick connect", { err });
+    });
+
     return { location: created, resolved };
+  },
+
+  /** Active Quick Connect–linked locations for the tenant. */
+  async listConnected(ctx: AuthContext) {
+    const items = await locationRepository.listQuickConnected(ctx.tenantId);
+    return { items, total: items.length };
+  },
+
+  /**
+   * Unlink a Quick Connect Place ID from a location.
+   * Keeps the location row; clears googlePlaceId + placeIdSource.
+   */
+  async disconnect(ctx: AuthContext, locationId: string, req: Request) {
+    const loc = await locationRepository.findByIdForTenant(
+      locationId,
+      ctx.tenantId,
+    );
+    if (!loc || loc.deletedAt) throw new NotFoundError("Location not found");
+
+    if (!isQuickConnectLink(loc)) {
+      throw new ForbiddenError(
+        "This location is not linked via Quick Connect. Disconnect from Official Google Business instead.",
+      );
+    }
+
+    const priorPlaceId = loc.googlePlaceId;
+    const updated = await locationRepository.update(locationId, {
+      googlePlaceId: null,
+      placeIdSource: null,
+    });
+
+    const rc = extractRequestContext(req);
+    await auditRepository.record({
+      action: AuditAction.GOOGLE_LOCATION_UNLINKED,
+      userId: ctx.userId,
+      tenantId: ctx.tenantId,
+      ipAddress: rc.ipAddress,
+      userAgent: rc.userAgent,
+      browser: rc.browser,
+      device: rc.device,
+      metadata: {
+        placeId: priorPlaceId,
+        locationId,
+        method: "quick_connect",
+      },
+    });
+
+    return { location: updated };
   },
 };
 

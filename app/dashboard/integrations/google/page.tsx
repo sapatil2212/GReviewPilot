@@ -21,7 +21,6 @@ import {
   Plug,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
   Trash2,
   Zap,
 } from "lucide-react";
@@ -30,10 +29,94 @@ import { EmptyState } from "@/components/dashboard/empty-state";
 import { ConfirmDialog } from "@/components/dashboard/confirm-dialog";
 import { Field, Select } from "@/components/dashboard/field";
 import { useApi } from "@/lib/api/useApi";
-import { googleApi, locationsApi } from "@/lib/api";
+import { googleApi, locationsApi, type SyncRunDto } from "@/lib/api";
 import { QuickConnectTab } from "./_components/quick-connect-tab";
 
 type Method = "official" | "quick";
+
+const ACTIVE_SYNC = new Set([
+  "QUEUED",
+  "PENDING",
+  "RUNNING",
+  "RETRYING",
+]);
+
+/**
+ * Safety net only.
+ *
+ * The server now sanitizes every stored sync error through
+ * `userFacingGoogleMessage`, so this no longer has to guess. It stays as a
+ * last line of defence for rows written before that change (and for any
+ * non-Google error that reaches the same field), because the one thing that
+ * must never happen is a raw Google quota string with project identifiers
+ * appearing on a tenant's screen.
+ */
+function friendlySyncError(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("mybusiness") ||
+    lower.includes("googleapis.com") ||
+    lower.includes("requests per minute") ||
+    lower.includes("resource_exhausted") ||
+    lower.includes("quota metric")
+  ) {
+    return "Google is temporarily limiting requests. Your sync is safely queued and will retry automatically.";
+  }
+  return raw;
+}
+
+/**
+ * Guidance for the OAuth failure codes the callback route sends back as
+ * `?reason=`. Rendered as a persistent banner rather than a toast: these are
+ * conditions the user has to act on, and a toast disappears before they have
+ * read it.
+ */
+const OAUTH_FAILURE_HELP: Record<
+  string,
+  { title: string; body: string; canRetry: boolean }
+> = {
+  consent_denied: {
+    title: "Google didn't complete the connection",
+    body:
+      "If you closed or cancelled the Google consent screen, try again. If you never saw a " +
+      "consent screen at all, this app has not been approved for your Google account yet — " +
+      "contact support and we'll enable access for you.",
+    canRetry: true,
+  },
+  admin_blocked: {
+    title: "Blocked by your Google administrator",
+    body:
+      "Your Google Workspace administrator restricts third-party app access. Ask them to " +
+      "allow GReviewPilot for your account, then connect again.",
+    canRetry: true,
+  },
+  scope_missing: {
+    title: "Business Profile permission was not granted",
+    body:
+      "We need the Business Profile permission to read your locations and reviews. Connect " +
+      "again and leave every requested permission checked.",
+    canRetry: true,
+  },
+  misconfigured: {
+    title: "Connection misconfigured",
+    body:
+      "The Google connection is misconfigured on our side. Our team has been notified — " +
+      "please try again later or contact support.",
+    canRetry: false,
+  },
+  state_invalid: {
+    title: "The connection attempt expired",
+    body:
+      "Connection requests are only valid for a few minutes. Start the connection again.",
+    canRetry: true,
+  },
+  unknown: {
+    title: "Google couldn't complete the connection",
+    body: "Something went wrong on Google's side. Please try again in a few minutes.",
+    canRetry: true,
+  },
+};
 
 /**
  * `useSearchParams` (used to read the OAuth callback status) opts this
@@ -68,20 +151,30 @@ function GoogleBusinessContent() {
   const runs = useApi(() => googleApi.syncRuns({ pageSize: 5 }), []);
 
   const [connecting, setConnecting] = useState(false);
+  // Captured from ?reason= before the query string is stripped, so the
+  // guidance survives the router.replace below.
+  const [oauthFailure, setOauthFailure] = useState<{
+    reason: string;
+    message: string | null;
+  } | null>(null);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [busyRow, setBusyRow] = useState<string | null>(null);
+  const [activeJob, setActiveJob] = useState<SyncRunDto | null>(null);
 
   useEffect(() => {
     const s = params?.get("status");
     const m = params?.get("message");
+    const reason = params?.get("reason");
     if (!s) return;
     if (s === "connected") {
       setMethod("official");
+      setOauthFailure(null);
       toast.success("Google Business connected");
     } else if (s === "error") {
       setMethod("official");
-      toast.error("Google OAuth failed", { description: m ?? undefined });
+      setOauthFailure({ reason: reason ?? "unknown", message: m });
+      toast.error("Google connection failed", { description: m ?? undefined });
     }
     router.replace("/dashboard/integrations/google");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -89,11 +182,57 @@ function GoogleBusinessContent() {
 
   // If already connected officially, default to that tab.
   useEffect(() => {
-    if (status.data?.account?.status === "CONNECTED") {
+    const st = status.data?.account?.status;
+    if (
+      st === "CONNECTED" ||
+      st === "SYNCING" ||
+      st === "RATE_LIMITED" ||
+      st === "REAUTH_REQUIRED"
+    ) {
       setMethod("official");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status.data?.account?.status]);
+
+  // Poll active sync job while queued/running.
+  useEffect(() => {
+    if (!activeJob || !ACTIVE_SYNC.has(activeJob.status)) return;
+    const id = activeJob.id;
+    const timer = setInterval(async () => {
+      try {
+        const job = await googleApi.getSyncJob(id);
+        setActiveJob(job);
+        if (!ACTIVE_SYNC.has(job.status)) {
+          clearInterval(timer);
+          await refreshAll();
+          if (job.status === "SUCCESS" || job.status === "PARTIAL") {
+            toast.success(
+              job.itemsProcessed > 0
+                ? `Sync complete — ${job.itemsProcessed} location${job.itemsProcessed === 1 ? "" : "s"} processed`
+                : "Sync complete — no locations found",
+            );
+          } else if (job.status === "FAILED") {
+            toast.error(
+              friendlySyncError(job.errorMessage) ?? "Sync failed",
+            );
+          }
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    }, 2500);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJob?.id, activeJob?.status]);
+
+  // Seed active job from recent sync runs on load.
+  useEffect(() => {
+    const latest = runs.data?.items?.[0];
+    if (latest && ACTIVE_SYNC.has(latest.status)) {
+      setActiveJob(latest);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs.data?.items?.[0]?.id, runs.data?.items?.[0]?.status]);
 
   async function refreshAll() {
     await Promise.all([status.refresh(), locations.refresh(), runs.refresh()]);
@@ -114,6 +253,7 @@ function GoogleBusinessContent() {
     try {
       await googleApi.disconnect();
       toast.success("Google account disconnected");
+      setActiveJob(null);
       await refreshAll();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Disconnect failed");
@@ -126,11 +266,13 @@ function GoogleBusinessContent() {
     setSyncing(true);
     try {
       const run = await googleApi.syncLocations();
-      toast.success(
-        `Sync ${run.status.toLowerCase()} — ${run.itemsProcessed} location${run.itemsProcessed === 1 ? "" : "s"} processed`,
+      setActiveJob(run);
+      toast.message(
+        run.created === false || run.message?.includes("already")
+          ? "A synchronization is already in progress"
+          : "Sync queued — we'll update locations in the background",
       );
-      await refreshAll();
-      await locations.refresh();
+      await runs.refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Sync failed");
     } finally {
@@ -158,7 +300,17 @@ function GoogleBusinessContent() {
 
   const s = status.data;
   const notConfigured = s && !s.configured;
-  const connected = s?.account && s.account.status === "CONNECTED";
+  const accountStatus = s?.account?.status;
+  const connected =
+    !!s?.account &&
+    (accountStatus === "CONNECTED" ||
+      accountStatus === "SYNCING" ||
+      accountStatus === "RATE_LIMITED" ||
+      accountStatus === "REAUTH_REQUIRED");
+  const jobActive = activeJob ? ACTIVE_SYNC.has(activeJob.status) : false;
+  const friendlyError = friendlySyncError(
+    activeJob?.errorMessage ?? s?.account?.lastSyncError,
+  );
 
   return (
     <>
@@ -184,10 +336,12 @@ function GoogleBusinessContent() {
           onSelect={() => setMethod("official")}
           icon={ShieldCheck}
           accent="emerald"
-          title="Official Google Business"
+          // "Official Google Business" could read as a claim of Google
+          // endorsement. This names the mechanism instead: Google OAuth.
+          title="Sign in with Google"
           badge={connected ? "Connected" : "Full access"}
           badgeGood={!!connected}
-          description="Sign in with Google to sync your locations, reviews, posts, and photos automatically."
+          description="Authorise GReviewPilot with Google OAuth to sync your locations, reviews, posts, and photos automatically."
           bullets={["Two-way review sync", "Auto-refresh", "Post publishing"]}
         />
       </div>
@@ -198,6 +352,52 @@ function GoogleBusinessContent() {
       {/* ---------- OFFICIAL ---------- */}
       {method === "official" && (
         <div className="space-y-4">
+          {/* OAuth failure guidance. Persistent, because every reason here
+              needs the user to do something specific. */}
+          {oauthFailure && (
+            <div
+              role="alert"
+              className="flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900"
+            >
+              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+              <div className="min-w-0">
+                <div className="font-semibold">
+                  {(OAUTH_FAILURE_HELP[oauthFailure.reason] ??
+                    OAUTH_FAILURE_HELP.unknown).title}
+                </div>
+                <p className="mt-1 text-xs text-red-900/80">
+                  {(OAUTH_FAILURE_HELP[oauthFailure.reason] ??
+                    OAUTH_FAILURE_HELP.unknown).body}
+                </p>
+                {oauthFailure.message && (
+                  <p className="mt-1.5 text-[11px] text-red-900/60">
+                    Google reported: {oauthFailure.message}
+                  </p>
+                )}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(OAUTH_FAILURE_HELP[oauthFailure.reason] ??
+                    OAUTH_FAILURE_HELP.unknown).canRetry && (
+                    <button
+                      type="button"
+                      onClick={handleConnect}
+                      disabled={connecting}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+                    >
+                      {connecting ? "Redirecting…" : "Try again"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setOauthFailure(null)}
+                    className="inline-flex items-center rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Toolbar for connected state */}
           {connected && (
             <div className="flex flex-wrap items-center justify-end gap-2">
@@ -280,7 +480,9 @@ function GoogleBusinessContent() {
                 <div className="mt-0.5 text-xs text-slate-500">
                   {s.account.googleAccountName ??
                     s.account.googleAccountId ??
-                    "Fetching account details…"}
+                    (jobActive
+                      ? "Setting up your Google Business Profile…"
+                      : "Fetching account details…")}
                 </div>
                 <div className="mt-2 grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
                   <div>
@@ -298,24 +500,112 @@ function GoogleBusinessContent() {
                     </span>
                   </div>
                 </div>
-                {s.account.lastSyncError && (
-                  <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-2 text-[11px] text-red-700">
-                    Last sync error: {s.account.lastSyncError}
+
+                {/* Sync progress */}
+                {(jobActive || accountStatus === "SYNCING") && (
+                  <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
+                    <div className="text-xs font-semibold text-blue-900">
+                      Initial Sync
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-blue-800/80">
+                      Setting up your Google Business Profile…
+                    </p>
+                    <ul className="mt-2 space-y-1 text-[11px] text-slate-700">
+                      <li className="flex items-center gap-1.5">
+                        <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+                        Finding accounts
+                        {activeJob?.kind === "ACCOUNTS" && jobActive
+                          ? "…"
+                          : ""}
+                      </li>
+                      <li className="flex items-center gap-1.5">
+                        {activeJob?.kind === "LOCATIONS" && jobActive ? (
+                          <RefreshCw className="h-3 w-3 animate-spin text-blue-600" />
+                        ) : (locations.data?.total ?? 0) > 0 ? (
+                          <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+                        ) : (
+                          <span className="h-3 w-3 rounded-full border border-slate-300" />
+                        )}
+                        Finding locations
+                        {activeJob?.kind === "LOCATIONS" && jobActive
+                          ? "…"
+                          : ""}
+                      </li>
+                      <li className="flex items-center gap-1.5">
+                        {(locations.data?.total ?? 0) > 0 && !jobActive ? (
+                          <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+                        ) : (
+                          <span className="h-3 w-3 rounded-full border border-slate-300" />
+                        )}
+                        Importing data
+                        {(locations.data?.total ?? 0) > 0 && !jobActive
+                          ? ` — ${locations.data!.total} location${locations.data!.total === 1 ? "" : "s"} synced`
+                          : ""}
+                      </li>
+                    </ul>
+                    {activeJob && (
+                      <div className="mt-2 text-[10px] uppercase tracking-wide text-blue-700">
+                        Status: {activeJob.status}
+                        {activeJob.status === "RETRYING" && activeJob.nextRetryAt
+                          ? ` · retry ${new Date(activeJob.nextRetryAt).toLocaleTimeString()}`
+                          : ""}
+                      </div>
+                    )}
                   </div>
                 )}
+
+                {(accountStatus === "RATE_LIMITED" ||
+                  activeJob?.status === "RETRYING" ||
+                  (friendlyError &&
+                    friendlyError.includes("limiting requests"))) && (
+                  <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-[11px] text-amber-900">
+                    <div className="font-semibold">Rate limited</div>
+                    <p className="mt-0.5">
+                      Google is temporarily limiting requests. Your sync is
+                      safely queued and will retry automatically.
+                    </p>
+                  </div>
+                )}
+
+                {accountStatus === "REAUTH_REQUIRED" && (
+                  <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2.5 text-[11px] text-red-800">
+                    Your Google connection needs to be reauthorized.{" "}
+                    <button
+                      type="button"
+                      onClick={handleConnect}
+                      className="font-semibold underline"
+                    >
+                      Reconnect
+                    </button>
+                  </div>
+                )}
+
+                {friendlyError &&
+                  accountStatus !== "RATE_LIMITED" &&
+                  accountStatus !== "REAUTH_REQUIRED" &&
+                  !friendlyError.includes("limiting requests") && (
+                  <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-2 text-[11px] text-red-700">
+                    {friendlyError}
+                  </div>
+                )}
+
                 <div className="mt-2 flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-600">
                   <RefreshCw className="mt-0.5 h-3 w-3 shrink-0 text-slate-400" />
                   <span>
                     <span className="font-semibold text-slate-700">
                       Automatic sync
                     </span>{" "}
-                    runs on a schedule when your deployment has{" "}
+                    queues background jobs when{" "}
                     <code className="rounded bg-slate-200 px-1">CRON_SECRET</code>{" "}
-                    configured and a scheduler calling{" "}
+                    is set and a scheduler calls{" "}
                     <code className="rounded bg-slate-200 px-1">
                       /api/cron/auto-sync
+                    </code>{" "}
+                    and{" "}
+                    <code className="rounded bg-slate-200 px-1">
+                      /api/cron/google-sync-worker
                     </code>
-                    . You can always sync manually above.
+                    . Manual sync never bursts Google APIs in the request.
                   </span>
                 </div>
               </section>
@@ -334,17 +624,23 @@ function GoogleBusinessContent() {
                 ) : (locations.data?.items.length ?? 0) === 0 ? (
                   <EmptyState
                     icon={Link2}
-                    title="No locations synced yet"
-                    description="Click Sync locations to pull the list from Google."
+                    title="No locations found"
+                    description={
+                      jobActive
+                        ? "Sync is still running — locations will appear here when ready."
+                        : "No Google Business locations were returned for this account. Click Sync locations to try again."
+                    }
                     action={
-                      <button
-                        onClick={handleSync}
-                        disabled={syncing}
-                        className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
-                      >
-                        <RefreshCw className={"h-3.5 w-3.5 " + (syncing ? "animate-spin" : "")} />
-                        Sync now
-                      </button>
+                      !jobActive ? (
+                        <button
+                          onClick={handleSync}
+                          disabled={syncing}
+                          className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                        >
+                          <RefreshCw className={"h-3.5 w-3.5 " + (syncing ? "animate-spin" : "")} />
+                          Sync now
+                        </button>
+                      ) : undefined
                     }
                   />
                 ) : (
@@ -540,10 +836,13 @@ function MethodCard({
 function StatusPill({ status }: { status: string }) {
   const map: Record<string, string> = {
     PENDING: "bg-slate-200 text-slate-700",
+    QUEUED: "bg-slate-200 text-slate-700",
     RUNNING: "bg-blue-100 text-blue-700",
+    RETRYING: "bg-amber-100 text-amber-700",
     SUCCESS: "bg-emerald-100 text-emerald-700",
     PARTIAL: "bg-amber-100 text-amber-700",
     FAILED: "bg-red-100 text-red-700",
+    CANCELLED: "bg-slate-100 text-slate-600",
   };
   return (
     <span

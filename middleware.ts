@@ -25,6 +25,7 @@ const PROTECTED_PREFIXES = [
   "/dashboard-v2",
   "/settings",
   "/admin",
+  "/super-admin",
   // The website builder needs the full viewport, so it sits outside
   // /dashboard. It still requires an authenticated session.
   "/builder",
@@ -32,9 +33,14 @@ const PROTECTED_PREFIXES = [
   // iframe them, which likewise puts them outside /dashboard.
   "/template-preview",
   "/api/private",
+  "/api/super-admin",
 ];
 
 const AUTH_PAGE = "/auth";
+const SUPER_ADMIN_LOGIN = "/super-admin/login";
+const PUBLIC_EXCEPTIONS = [
+  "/super-admin/login",
+];
 
 /**
  * Marks an internal rewrite target as host-addressed rather than slug-addressed.
@@ -76,7 +82,12 @@ function isPlatformHost(hostname: string): boolean {
     try {
       const platform = new URL(appUrl).hostname.toLowerCase();
       if (hostname === platform) return true;
-      // Subdomains of the platform host are reserved for the platform.
+      // Subdomains of the platform host are reserved for the platform. This
+      // also covers the www counterpart nginx provisions for the platform's own
+      // domain (see sslProvisioning.service.ts platformHostnames()) — nginx
+      // redirects that hostname to the primary at the edge, but if a request
+      // ever reached this app on it directly, it must render the dashboard, not
+      // 404 as an unclaimed tenant domain.
       if (hostname.endsWith(`.${platform}`)) return true;
     } catch {
       // A malformed APP_URL must not break routing; fall through.
@@ -167,11 +178,12 @@ export async function middleware(req: NextRequest) {
 
   if (!isValid) {
     const url = req.nextUrl.clone();
-    url.pathname = AUTH_PAGE;
+    url.pathname = pathname.startsWith("/super-admin") ? "/super-admin/login" : AUTH_PAGE;
     url.search = "";
     url.searchParams.set("callbackUrl", pathname + search);
     return NextResponse.redirect(url);
   }
+
 
   return NextResponse.next();
 }

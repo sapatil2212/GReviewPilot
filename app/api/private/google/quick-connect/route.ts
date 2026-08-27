@@ -1,6 +1,6 @@
 /**
- * POST /api/private/google/quick-connect
- * Body: { input, mode: "new"|"existing", locationId?, name?, city?, country? }
+ * GET  /api/private/google/quick-connect — list Quick Connect–linked locations
+ * POST /api/private/google/quick-connect — connect via Maps URL / Place ID
  *
  * The non-OAuth connection path. Resolves a Place ID from a Maps URL
  * or raw ID and attaches it to a new or existing location, enabling
@@ -15,6 +15,17 @@ import { quickConnectSchema } from "@/server/validators/google.schema";
 import { handleError, ok } from "@/server/utils/response";
 
 export const runtime = "nodejs";
+
+export async function GET() {
+  try {
+    const ctx = await requireSession();
+    requirePermission(ctx, "google:manage");
+    const result = await quickConnectService.listConnected(ctx);
+    return ok(result);
+  } catch (err) {
+    return handleError(err);
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {

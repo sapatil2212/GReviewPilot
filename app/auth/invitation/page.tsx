@@ -10,6 +10,7 @@
  */
 
 import Link from "next/link";
+import Image from "next/image";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AlertCircle, CheckCircle2, MailCheck } from "lucide-react";
@@ -134,9 +135,30 @@ function InvitationAcceptContent() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
-      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-slate-900">
+    <div className="relative min-h-screen overflow-hidden bg-background">
+      <div className="pointer-events-none absolute inset-0 opacity-80">
+        <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-primary/20 blur-3xl animate-pulse-glow" />
+        <div className="absolute top-40 -right-24 h-[28rem] w-[28rem] rounded-full bg-secondary/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/3 h-96 w-96 rounded-full bg-accent/20 blur-3xl" />
+      </div>
+
+      <header className="absolute inset-x-0 top-0 z-20 flex items-center justify-between px-6 py-6 sm:px-10">
+        <Link href="/" className="group flex items-center">
+          <Image
+            src="/assets/logo/greviewpilot-logo.png"
+            alt="GReviewPilot Logo"
+            width={180}
+            height={40}
+            className="h-9 w-auto object-contain transition-transform group-hover:scale-105"
+            priority
+          />
+        </Link>
+      </header>
+
+      <div className="relative z-10 mx-auto flex min-h-screen max-w-md items-center justify-center px-4 pt-20 pb-12">
+        <div className="w-full">
+          <div className="glass shadow-elevated rounded-3xl border border-border/80 bg-background/90 p-6 sm:p-8 backdrop-blur-2xl">
+            <div className="mb-4 flex items-center gap-2 text-base font-semibold text-foreground">
           <MailCheck className="h-5 w-5 text-blue-600" />
           You&apos;re invited
         </div>
@@ -246,6 +268,8 @@ function InvitationAcceptContent() {
             </div>
           </div>
         )}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -11,6 +11,7 @@
  *   npm run ssl:provision -- --host clinic.com        provision one domain
  *   npm run ssl:provision -- --all                    provision every connected domain
  *   npm run ssl:provision -- --host clinic.com --force  reissue even if valid
+ *   npm run ssl:provision -- --platform                provision the app's own hostname(s)
  *
  * Start with --check, then --preview, then a single --host against
  * ACME_DIRECTORY=staging. Only switch to production once a staging certificate
@@ -81,8 +82,45 @@ async function main() {
     return;
   }
 
-  const { provisionCertificate } = await import("../src/server/services/sslProvisioning.service");
+  const {
+    provisionCertificate,
+    provisionPlatformCertificates,
+    platformHostnames,
+  } = await import("../src/server/services/sslProvisioning.service");
   const force = flag("force");
+
+  // ---- The platform's own hostname(s) ----
+  if (flag("platform")) {
+    const { primary, aliases } = platformHostnames();
+    heading("Platform hostnames");
+    console.log(`  primary: ${primary || "(APP_URL is not a valid URL)"}`);
+    console.log(`  aliases: ${aliases.length ? aliases.join(", ") : "(none)"}`);
+
+    if (!primary) {
+      console.error("\n  Cannot provision: APP_URL is not a valid URL.");
+      process.exitCode = 1;
+      return;
+    }
+
+    const results = await provisionPlatformCertificates({ force });
+    console.log("");
+    let failed = 0;
+    for (const result of results) {
+      if (result.action === "failed") failed += 1;
+      console.log(
+        `  ${result.action === "failed" ? "x" : "+"} ${result.hostname.padEnd(28)} ${result.action}  ${result.reason}`,
+      );
+    }
+    if (results.some((r) => r.staging)) {
+      console.log(
+        "\n  Staging certificate(s) — browsers will show a warning. This proves the\n" +
+          "  pipeline works. Set ACME_DIRECTORY=production and re-run with --force.",
+      );
+    }
+    console.log(failed === 0 ? "\nDone." : `\n${failed} hostname(s) failed.`);
+    process.exitCode = failed === 0 ? 0 : 1;
+    return;
+  }
 
   // ---- One domain ----
   const host = value("host");

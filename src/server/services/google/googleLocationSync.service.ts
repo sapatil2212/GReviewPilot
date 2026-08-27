@@ -39,6 +39,134 @@ export const googleLocationSyncService = {
     return googleLocationRepository.listForTenant(ctx.tenantId);
   },
 
+  /**
+   * Run the location sync using an **already-created** client and accounts
+   * list. Called from `completeOAuth` so that connecting + initial sync
+   * happen in a single API session — no extra `listAccounts()` call.
+   */
+  async initialSync(opts: {
+    tenantId: string;
+    userId: string;
+    googleAccountDbId: string;
+    client: import("./googleClient").GoogleBusinessClient;
+    accounts: import("./googleClient").GoogleAccountResource[];
+  }) {
+    const { tenantId, userId, googleAccountDbId, client, accounts } = opts;
+
+    const run = await syncRunRepository.create({
+      tenantId,
+      googleAccountId: googleAccountDbId,
+      kind: SyncKind.LOCATIONS,
+      triggeredById: userId,
+    });
+
+    const outcome: SyncOutcome = {
+      status: SyncStatus.RUNNING,
+      itemsProcessed: 0,
+      itemsCreated: 0,
+      itemsUpdated: 0,
+      itemsFailed: 0,
+    };
+
+    try {
+      const seenResourceNames: string[] = [];
+      for (const acc of accounts) {
+        if (acc.type === "PERSONAL") {
+          logger.info("initialSync: Skipping PERSONAL account", {
+            accountName: acc.name,
+          });
+          continue;
+        }
+
+        let locations: GoogleLocationResource[] = [];
+        try {
+          locations = await client.listLocations(acc.name);
+          logger.info("initialSync: Fetched locations", {
+            accountName: acc.name,
+            accountType: acc.type,
+            count: locations.length,
+          });
+        } catch (err) {
+          logger.warn("initialSync: listLocations failed", {
+            accountName: acc.name,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          outcome.itemsFailed += 1;
+          continue;
+        }
+
+        for (const loc of locations) {
+          outcome.itemsProcessed += 1;
+          try {
+            const resourceName = ensureResourceName(acc.name, loc.name);
+            seenResourceNames.push(resourceName);
+            const shaped = shapeLocation(loc);
+            const dataHash = createHash("sha256")
+              .update(JSON.stringify(loc))
+              .digest("hex");
+
+            const existing = await googleLocationRepository.findByResourceName(
+              googleAccountDbId,
+              resourceName,
+            );
+
+            await googleLocationRepository.upsert({
+              tenantId,
+              googleAccountId: googleAccountDbId,
+              googleLocationName: resourceName,
+              googleLocationId: extractLocationId(resourceName),
+              googlePlaceId: shaped.googlePlaceId,
+              title: shaped.title,
+              storeCode: shaped.storeCode,
+              primaryCategory: shaped.primaryCategory,
+              addressLine: shaped.addressLine,
+              city: shaped.city,
+              state: shaped.state,
+              postalCode: shaped.postalCode,
+              country: shaped.country,
+              phone: shaped.phone,
+              websiteUri: shaped.websiteUri,
+              raw: loc as unknown as Prisma.InputJsonValue,
+              dataHash,
+            });
+
+            if (!existing) outcome.itemsCreated += 1;
+            else if (existing.dataHash !== dataHash) outcome.itemsUpdated += 1;
+          } catch (err) {
+            logger.warn("initialSync: location upsert failed", {
+              err: err instanceof Error ? err.message : String(err),
+            });
+            outcome.itemsFailed += 1;
+          }
+        }
+      }
+
+      await googleLocationRepository.deleteMissing(googleAccountDbId, seenResourceNames);
+      outcome.status =
+        outcome.itemsFailed === 0
+          ? SyncStatus.SUCCESS
+          : outcome.itemsProcessed === outcome.itemsFailed
+            ? SyncStatus.FAILED
+            : SyncStatus.PARTIAL;
+      const completed = await syncRunRepository.complete(run.id, outcome);
+      await googleAccountRepository.updateSyncTimestamp(googleAccountDbId, new Date(), null);
+      logger.info("initialSync: completed", {
+        created: outcome.itemsCreated,
+        updated: outcome.itemsUpdated,
+        failed: outcome.itemsFailed,
+      });
+      return completed;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await syncRunRepository.fail(run.id, message);
+      await googleAccountRepository.updateSyncTimestamp(googleAccountDbId, new Date(), message);
+      logger.warn("initialSync: failed", { error: message });
+      // Don't rethrow — connect itself succeeded; sync failure is non-fatal.
+      return null;
+    }
+  },
+
+
   async runFor(ctx: AuthContext, req: Request) {
     const { account, client } = await googleAccountService.getClient(
       ctx.tenantId,
@@ -86,12 +214,29 @@ export const googleLocationSyncService = {
 
       const seenResourceNames: string[] = [];
       for (const acc of accounts) {
+        // The Business Information API v1 only supports listing locations
+        // under LOCATION_GROUP and ORGANIZATION type accounts.
+        // PERSONAL type accounts have no listable locations via this API —
+        // skipping them avoids empty results and confusing 404 errors.
+        if (acc.type === "PERSONAL") {
+          logger.info("Skipping PERSONAL account (no listable locations)", {
+            accountName: acc.name,
+          });
+          continue;
+        }
+
         let locations: GoogleLocationResource[] = [];
         try {
           locations = await client.listLocations(acc.name);
+          logger.info("Fetched locations from account", {
+            accountName: acc.name,
+            accountType: acc.type,
+            count: locations.length,
+          });
         } catch (err) {
           logger.warn("listLocations failed", {
             accountName: acc.name,
+            accountType: acc.type,
             err: err instanceof Error ? err.message : String(err),
           });
           outcome.itemsFailed += 1;

@@ -61,6 +61,24 @@ export const signupSchema = z.object({
 });
 export type SignupInput = z.infer<typeof signupSchema>;
 
+// ------- Google signup completion -------
+// After Google OAuth we already have a verified identity. The wizard
+// collects the remaining business / onboarding fields (no password, no OTP).
+export const completeGoogleSignupSchema = z.object({
+  firstName: name.optional(),
+  lastName: name.optional(),
+  businessName: z.string().trim().min(1, "Business name is required").max(150),
+  businessWebsite,
+  businessPhone: z.string().trim().max(30).optional().transform((v) => v || undefined),
+  category: z.string().trim().min(1, "Please select your business category").max(120),
+  locations: z.string().trim().min(1).max(40).optional().default("1 location"),
+  achieve: z.array(z.string().trim().min(1).max(40)).max(20).optional().default([]),
+  acceptTerms: z.literal(true, {
+    errorMap: () => ({ message: "You must accept the Terms and Privacy Policy" }),
+  }),
+});
+export type CompleteGoogleSignupInput = z.infer<typeof completeGoogleSignupSchema>;
+
 // ------- Login -------
 export const loginSchema = z.object({
   email,
@@ -106,3 +124,24 @@ export const changePasswordSchema = z
     path: ["confirmPassword"],
   });
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+
+// ------- Activate plan (post-trial) -------
+export const activatePlanSchema = z.object({
+  email: email.optional(),
+  password: z.string().min(1).max(128).optional(),
+  plan: z.enum(["STARTER", "GROWTH", "SCALE"]),
+});
+export type ActivatePlanInput = z.infer<typeof activatePlanSchema>;
+
+// ------- Restore deleted account -------
+export const restoreAccountSchema = z.object({
+  email,
+  password: z.string().min(1, "Password is required").max(128),
+});
+export type RestoreAccountInput = z.infer<typeof restoreAccountSchema>;
+
+// ------- Delete account -------
+export const deleteAccountSchema = z.object({
+  confirmation: z.string().trim().min(1),
+});
+export type DeleteAccountInput = z.infer<typeof deleteAccountSchema>;

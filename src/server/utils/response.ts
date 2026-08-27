@@ -21,6 +21,7 @@ export interface ApiError {
     code: string;
     message: string;
     fields?: Record<string, string>;
+    data?: unknown;
   };
 }
 
@@ -36,11 +37,21 @@ export function ok<T>(data: T, init?: { message?: string; status?: number }) {
 export function fail(
   code: string,
   message: string,
-  init?: { status?: number; fields?: Record<string, string>; headers?: HeadersInit },
+  init?: {
+    status?: number;
+    fields?: Record<string, string>;
+    data?: unknown;
+    headers?: HeadersInit;
+  },
 ) {
   const body: ApiError = {
     success: false,
-    error: { code, message, ...(init?.fields ? { fields: init.fields } : {}) },
+    error: {
+      code,
+      message,
+      ...(init?.fields ? { fields: init.fields } : {}),
+      ...(init?.data !== undefined ? { data: init.data } : {}),
+    },
   };
   return NextResponse.json(body, {
     status: init?.status ?? 400,
@@ -76,6 +87,7 @@ export function handleError(err: unknown): Response {
     return fail(err.code, err.publicMessage, {
       status: err.status,
       headers,
+      data: err.meta,
     });
   }
 

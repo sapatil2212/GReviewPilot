@@ -59,6 +59,28 @@ export const locationRepository = {
     });
   },
 
+  /**
+   * Locations linked via Quick Connect (Maps URL / Place ID).
+   * Includes `placeIdSource: "manual"` and legacy Place-ID-only rows
+   * that were never linked via Official OAuth (`googleLocationId` null).
+   */
+  listQuickConnected(tenantId: string) {
+    return prisma.location.findMany({
+      where: {
+        tenantId,
+        deletedAt: null,
+        status: LocationStatus.ACTIVE,
+        googlePlaceId: { not: null },
+        OR: [
+          { placeIdSource: "manual" },
+          { placeIdSource: null, googleLocationId: null },
+        ],
+      },
+      include: LOCATION_INCLUDE,
+      orderBy: { updatedAt: "desc" },
+    });
+  },
+
   create(data: Prisma.LocationCreateInput) {
     return prisma.location.create({ data, include: LOCATION_INCLUDE });
   },

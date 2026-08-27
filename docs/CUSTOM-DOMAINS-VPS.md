@@ -208,10 +208,14 @@ APP_UPSTREAM="127.0.0.1:3000"
 # Your VPS public IP — tenants point root-domain A records at this.
 SITE_APEX_IP="203.0.113.10"
 # Bare hostname tenants point subdomain CNAMEs at. No scheme, no port.
-# Leave blank and it falls back to APP_URL's hostname — which yields
-# "localhost" in development and tells tenants to point their domain at
-# localhost. Always set it explicitly in production.
-SITE_CNAME_TARGET="app.yourdomain.com"
+# Leave blank and it falls back to APP_URL's hostname — correct as long as
+# APP_URL's hostname is itself a public, resolvable address (never "localhost"
+# in production). Set it explicitly only if the CNAME target should differ from
+# the platform host.
+SITE_CNAME_TARGET=""
+# Issues a certificate + nginx vhost for the www counterpart of APP_URL's
+# hostname too, redirecting it to the primary. On by default.
+PLATFORM_INCLUDE_WWW="true"
 
 SSL_PROVISIONING="nginx"
 ACME_DIRECTORY="staging"          # switch to production after a successful run
@@ -246,17 +250,36 @@ the jobs:
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-### Platform host vs. tenant hosts
+### Platform host vs. tenant hosts — the one rule that matters
 
-Middleware treats the hostname in `APP_URL` (and its subdomains) as the platform,
-and **every other hostname as a tenant domain**. With
-`APP_URL="https://app.yourdomain.com"`, the apex `yourdomain.com` and
-`www.yourdomain.com` are *not* platform hosts — a request to either is routed as a
-custom domain and 404s unless a tenant owns it.
+Middleware treats the hostname in `APP_URL` as **the** platform host, and
+**every other hostname as a tenant custom domain**. There is no in-between:
 
-If you serve a marketing site at the apex, it must either be a separate nginx
-vhost that never reaches this app, or the apex must be registered as a real
-`SiteDomain`. `npm run doctor` prints this warning with your actual hostnames.
+- `APP_URL`'s hostname → dashboard, marketing pages, API, everything.
+- Any other hostname → routed through the tenant-domain rewrite, and 404s unless
+  some tenant's `SiteDomain` claims it.
+
+This app serves the marketing site (`/`, `/about`, `/pricing`) and the dashboard
+from the **same Next.js deployment** — they are not separate apps. So if your
+marketing site and dashboard should both live at your own domain (the normal
+case), `APP_URL` must be set to that domain directly. Pointing `APP_URL` at a
+*different* hostname than the one your marketing site is meant to serve — for
+example `APP_URL=https://app.yourdomain.com` while visitors land on
+`yourdomain.com` — makes `yourdomain.com` a tenant domain in this app's own eyes.
+Unless a tenant happens to own it, it 404s. It also means `yourdomain.com` gets no
+automatic certificate, because platform certificate provisioning follows
+`APP_URL`.
+
+**Fix:** set `APP_URL` to the domain you actually want people to visit.
+`PLATFORM_INCLUDE_WWW=true` (default) then covers the `www` counterpart
+automatically — both hostnames get certificates and both work.
+
+If you deliberately want the dashboard on a subdomain (`app.yourdomain.com`)
+*separate* from a marketing site at the apex, that apex must be served by an
+entirely different nginx vhost that never proxies to this app — or registered as
+a real tenant `SiteDomain` if this app is meant to render it. `npm run doctor`
+checks whether `APP_URL`'s hostname actually resolves and flags the apex/www
+distinction with your real values.
 
 ---
 
@@ -297,8 +320,9 @@ broken certificate.
 ```bash
 # 0. Preflight. Tests the things that actually break: directory writability by
 #    the app user, the sudo reload helper, `nginx -t` over the live config, the
-#    include glob, the $connection_upgrade map, database reachability, and whether
-#    the app is listening on APP_UPSTREAM. Fix every failure before continuing.
+#    include glob, the $connection_upgrade map, database reachability, whether
+#    the app is listening on APP_UPSTREAM, and whether APP_URL's hostname
+#    actually resolves to this server. Fix every failure before continuing.
 npm run doctor
 
 # 1. Confirm configuration is what you think it is.
@@ -308,29 +332,31 @@ npm run ssl:provision -- --check
 npm run verify:nginx
 npm run verify:nginx:syntax     # runs the real `nginx -t` when nginx is present
 
-# 3. Add the domain in the dashboard, point DNS, press Verify.
+# 3. Provision the platform's own certificate FIRST — the dashboard tenants use
+#    to add their own domains needs to be reachable over HTTPS before any of
+#    this matters. Covers APP_URL's hostname and, by default, its www alias.
+npm run ssl:provision -- --platform
+#    Expect action=issued for each. Visiting https://yourdomain.com now shows a
+#    browser warning — correct for staging. The warning proves TLS terminates
+#    with your certificate, not someone else's.
+
+# 4. Switch to production and reissue.
+#    Set ACME_DIRECTORY=production, restart the app, then:
+npm run ssl:provision -- --platform --force
+curl -vI https://yourdomain.com 2>&1 | grep -i "issuer\|subject"
+
+# 5. Now tenant domains. Add one in the dashboard, point DNS, press Verify.
 #    Wait for status CONNECTED before going further — issuing against a domain
 #    that doesn't resolve to you wastes a rate-limited attempt.
-
-# 4. Inspect what would be written.
-npm run ssl:provision -- --preview clinic.com
-
-# 5. Issue a staging certificate.
-npm run ssl:provision -- --host clinic.com
-#    Expect action=issued. Visiting https://clinic.com now shows a browser
-#    warning — correct for staging. The warning proves TLS terminates with your
-#    certificate.
-
-# 6. Switch to production and reissue.
-#    Set ACME_DIRECTORY=production, restart the app, then:
-npm run ssl:provision -- --host clinic.com --force
-
-# 7. Confirm.
-curl -vI https://clinic.com 2>&1 | grep -i "issuer\|subject"
+npm run ssl:provision -- --preview clinic.com    # inspect what would be written
+npm run ssl:provision -- --host clinic.com       # staging
+npm run ssl:provision -- --host clinic.com --force  # after switching to production
 ```
 
 After that, tenants connect domains through the dashboard with no manual step:
-Verify triggers issuance automatically once DNS resolves.
+Verify triggers issuance automatically once DNS resolves. The platform's own
+certificate renews automatically too — the hourly job provisions it alongside
+every tenant domain, so step 3/4 above only needs to run once.
 
 ---
 

@@ -17,7 +17,7 @@ import type { JWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
 import { PrismaAdapter } from "@auth/prisma-adapter";
-import { UserRole, UserStatus, TenantStatus } from "@prisma/client";
+import { UserRole, UserStatus, TenantStatus, TenantPlan, BillingStatus, AuditAction } from "@prisma/client";
 
 import { prisma } from "@/server/db/prisma";
 import { env, googleAuthEnabled } from "@/server/utils/env";
@@ -29,8 +29,9 @@ import { auditRepository } from "@/server/repositories/audit.repository";
 import { loginSchema } from "@/server/validators/auth.schema";
 import { AppError, UnauthorizedError } from "@/server/utils/errors";
 import { logger } from "@/server/utils/logger";
+import { trialEndsAtFrom, readTenantMeta } from "@/server/utils/trial";
 import { AUTH_COOKIE } from "./cookies";
-import { AuditAction } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 
 // The JWT shape is augmented in src/types/next-auth.d.ts, adding
 // `tid`, `role`, `sid`, and `stk` on top of the standard fields.
@@ -98,7 +99,13 @@ export const authConfig: NextAuthConfig = {
           Google({
             clientId: env.GOOGLE_CLIENT_ID,
             clientSecret: env.GOOGLE_CLIENT_SECRET,
-            allowDangerousEmailAccountLinking: false,
+            // We handle account linking ourselves in the signIn callback.
+            // Setting this to true lets the PrismaAdapter link an OAuth
+            // account to an existing User row without throwing
+            // OAuthAccountNotLinked. Our signIn callback already gates
+            // the merge with our own business logic (blocked, suspended,
+            // etc.), so we are the authority — the adapter just writes the row.
+            allowDangerousEmailAccountLinking: true,
           }),
         ]
       : []),
@@ -119,13 +126,79 @@ export const authConfig: NextAuthConfig = {
 
         const existing = await userRepository.findByEmail(email);
         if (existing) {
-          if (existing.status === UserStatus.BLOCKED || existing.status === UserStatus.DELETED) {
+          if (existing.status === UserStatus.BLOCKED) {
             return false;
           }
-          const tenant = await prisma.tenant.findUnique({ where: { id: existing.tenantId } });
-          if (!tenant || tenant.status === TenantStatus.SUSPENDED || tenant.status === TenantStatus.DELETED) {
+
+          let tenant = await prisma.tenant.findUnique({ where: { id: existing.tenantId } });
+          if (!tenant || tenant.status === TenantStatus.SUSPENDED) {
             return false;
           }
+
+          // Check whether this user was registered with credentials only (no linked
+          // Google Account row yet). If so, block Google sign-in and redirect to
+          // an explicit error — the user must log in with their password and link
+          // Google from settings, or use the same email+password path.
+          const linkedGoogleAccount = await prisma.account.findFirst({
+            where: { userId: existing.id, provider: "google" },
+          });
+          if (!linkedGoogleAccount) {
+            // Check if they have a password hash — meaning they signed up via credentials.
+            const userWithPassword = await prisma.user.findUnique({
+              where: { id: existing.id },
+              select: { passwordHash: true },
+            });
+            if (userWithPassword?.passwordHash) {
+              // Credentials-only account — block Google sign-in to prevent
+              // account takeover. Return a redirect URL that shows a clear error.
+              return "/auth?error=OAuthAccountNotLinked";
+            }
+          }
+
+          // Soft-deleted workspace — Google identity proves ownership, restore it.
+          if (
+            existing.status === UserStatus.DELETED ||
+            tenant.status === TenantStatus.DELETED
+          ) {
+            const meta = readTenantMeta(tenant.metadata);
+            const prevStatus =
+              (meta.previousStatus as TenantStatus | undefined) ?? TenantStatus.TRIAL;
+            const prevPlan =
+              (meta.previousPlan as TenantPlan | undefined) ?? TenantPlan.TRIAL;
+            const prevBilling =
+              (meta.previousBillingStatus as BillingStatus | undefined) ??
+              BillingStatus.TRIALING;
+            delete meta.deletedAt;
+            delete meta.deletedByUserId;
+            delete meta.previousStatus;
+            delete meta.previousPlan;
+            delete meta.previousBillingStatus;
+
+            await prisma.$transaction(async (tx) => {
+              await tx.user.updateMany({
+                where: { tenantId: tenant!.id },
+                data: { status: UserStatus.ACTIVE },
+              });
+              tenant = await tx.tenant.update({
+                where: { id: tenant!.id },
+                data: {
+                  status:
+                    prevStatus === TenantStatus.DELETED ? TenantStatus.TRIAL : prevStatus,
+                  plan: prevPlan,
+                  billingStatus: prevBilling,
+                  reactivatedAt: new Date(),
+                  metadata: meta as Prisma.InputJsonValue,
+                },
+              });
+            });
+            await auditRepository.record({
+              action: AuditAction.WORKSPACE_REACTIVATED,
+              userId: existing.id,
+              tenantId: existing.tenantId,
+              metadata: { reason: "google_login_restore" },
+            });
+          }
+
           // Auto-mark email verified when Google confirms it.
           if (!existing.emailVerified) {
             await userRepository.updateById(existing.id, {
@@ -146,21 +219,33 @@ export const authConfig: NextAuthConfig = {
           return true;
         }
 
-        // New Google user — create tenant + user.
+        // New Google user — create a provisional tenant + user, then send
+        // them through the remaining signup wizard (business details +
+        // onboarding). Personal identity comes from Google; business
+        // fields are collected on /auth?mode=signup&google=1.
         const displayName = (profile?.name as string | undefined) ?? email.split("@")[0]!;
         const parts = displayName.split(/\s+/);
         const firstName = parts[0] ?? "Owner";
         const lastName = parts.slice(1).join(" ") || "";
-        const businessName = `${firstName}'s workspace`;
+        const provisionalName = `${firstName}'s workspace`;
 
         try {
           const created = await prisma.$transaction(async (tx) => {
-            const slug = await tenantService.generateUniqueSlug(businessName);
+            const now = new Date();
+            const slug = await tenantService.generateUniqueSlug(provisionalName);
             const tenant = await tx.tenant.create({
               data: {
-                name: businessName,
+                name: provisionalName,
                 slug,
-                trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+                plan: TenantPlan.TRIAL,
+                status: TenantStatus.TRIAL,
+                billingStatus: BillingStatus.TRIALING,
+                trialStartAt: now,
+                trialEndsAt: trialEndsAtFrom(now),
+                metadata: {
+                  signupIncomplete: true,
+                  signupProvider: "google",
+                },
               },
             });
             const created = await tx.user.create({

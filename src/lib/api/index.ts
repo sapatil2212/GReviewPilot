@@ -169,6 +169,8 @@ export interface LocationDto {
   longitude: string | null;
   googleLocationId: string | null;
   googlePlaceId: string | null;
+  /** "official" | "manual" (Quick Connect) | null */
+  placeIdSource?: string | null;
   phone: string | null;
   email: string | null;
   website: string | null;
@@ -518,6 +520,37 @@ export interface ReviewStatsDto {
   averageRating: number | null;
 }
 
+/** Counts from an inline (Quick Connect / Places) review sync. */
+export interface ReviewSyncCounts {
+  processed: number;
+  created: number;
+  updated: number;
+  failed: number;
+  removedSeeds: number;
+  placesFetched: number;
+  gmbFetched: number;
+  placeRatingsTotal: number | null;
+  placeAverageRating: number | null;
+  placesApiEnabled: boolean;
+  warnings: string[];
+}
+
+/**
+ * Result of POST /api/private/reviews/sync.
+ *
+ * Discriminated on `queued`: an official Google connection enqueues a
+ * background job and has no counts yet, while a Quick Connect tenant syncs
+ * inline and does. Reading counts off the queued branch is a type error.
+ */
+export type ReviewSyncResult =
+  | {
+      queued: true;
+      jobCreated: boolean;
+      message: string;
+      job: SyncRunDto;
+    }
+  | ({ queued: false } & ReviewSyncCounts);
+
 export const reviewsApi = {
   list: (q: {
     page?: number;
@@ -567,6 +600,19 @@ export const reviewsApi = {
       "/api/private/reviews/analyze-sentiment",
       { method: "POST", body: JSON.stringify({ limit }) },
     ).then((r) => r.data),
+  /**
+   * Trigger a review sync from Google Business Profile / Places API.
+   *
+   * Two genuinely different outcomes, so the result is a discriminated union
+   * rather than one wide shape. When an official Google account is connected
+   * the work is queued and no counts exist yet — the endpoint used to pad the
+   * response with zeros, which the UI rendered as a real "0 reviews synced"
+   * result. Narrow on `queued` before reading counts.
+   */
+  sync: () =>
+    apiFetch<ReviewSyncResult>("/api/private/reviews/sync", {
+      method: "POST",
+    }).then((r) => r.data),
   // AI reply drafting now lives in aiReplyApi (src/lib/api/ai.ts), which uses
   // the Business Personality rather than a per-request tone argument.
   archive: (id: string) =>
@@ -676,7 +722,14 @@ export interface GoogleAccountStatusDto {
     email: string;
     googleAccountId: string | null;
     googleAccountName: string | null;
-    status: "CONNECTED" | "DISCONNECTED" | "TOKEN_EXPIRED" | "ERROR";
+    status:
+      | "CONNECTED"
+      | "SYNCING"
+      | "DISCONNECTED"
+      | "TOKEN_EXPIRED"
+      | "RATE_LIMITED"
+      | "REAUTH_REQUIRED"
+      | "ERROR";
     scopes: string;
     expiresAt: string;
     lastSyncedAt: string | null;
@@ -725,15 +778,33 @@ export interface SyncRunDto {
   id: string;
   tenantId: string;
   googleAccountId: string | null;
+  googleLocationId?: string | null;
   kind: string;
-  status: "PENDING" | "RUNNING" | "SUCCESS" | "PARTIAL" | "FAILED";
+  status:
+    | "PENDING"
+    | "QUEUED"
+    | "RUNNING"
+    | "RETRYING"
+    | "SUCCESS"
+    | "PARTIAL"
+    | "FAILED"
+    | "CANCELLED";
+  priority?: number;
   startedAt: string;
   finishedAt: string | null;
+  lastAttemptAt?: string | null;
+  nextRetryAt?: string | null;
+  attemptCount?: number;
+  totalItems?: number;
   itemsProcessed: number;
   itemsCreated: number;
   itemsUpdated: number;
   itemsFailed: number;
+  lastErrorCode?: string | null;
   errorMessage: string | null;
+  queued?: boolean;
+  created?: boolean;
+  message?: string;
   triggeredBy: {
     id: string;
     firstName: string;
@@ -757,6 +828,13 @@ export const googleApi = {
     apiFetch<SyncRunDto>("/api/private/google/sync/locations", {
       method: "POST",
     }).then((r) => r.data),
+  enqueueSync: (kind: "ACCOUNTS" | "LOCATIONS" | "REVIEWS" | "FULL" = "LOCATIONS") =>
+    apiFetch<{ job: SyncRunDto; created: boolean; message: string }>(
+      "/api/private/google/sync",
+      { method: "POST", body: JSON.stringify({ kind }) },
+    ).then((r) => r.data),
+  getSyncJob: (id: string) =>
+    apiFetch<SyncRunDto>(`/api/private/google/sync/${id}`).then((r) => r.data),
   listLocations: () =>
     apiFetch<{ items: GoogleLocationRowDto[]; total: number }>(
       "/api/private/google/locations",
@@ -781,8 +859,33 @@ export const googleApi = {
     }
     return apiFetch<Paged<SyncRunDto>>(url.pathname + url.search).then((r) => r.data);
   },
+  diagnostics: () =>
+    apiFetch<{
+      queueDepth: number;
+      requestsLastHour: number;
+      rateLimitErrorsLastHour: number;
+      activeJobs: number;
+      recentFailures: Array<{
+        id: string;
+        tenantId: string;
+        kind: string;
+        lastErrorCode: string | null;
+        errorMessage: string | null;
+        finishedAt: string | null;
+      }>;
+      apiBreakdown: Array<{ apiName: string; count: number; errors: number }>;
+    }>("/api/private/google/diagnostics").then((r) => r.data),
 
   // Quick Connect (non-OAuth)
+  listQuickConnected: () =>
+    apiFetch<{ items: LocationDto[]; total: number }>(
+      "/api/private/google/quick-connect",
+    ).then((r) => r.data),
+  disconnectQuickConnect: (locationId: string) =>
+    apiFetch<{ location: LocationDto }>(
+      `/api/private/google/quick-connect/${locationId}/disconnect`,
+      { method: "POST" },
+    ).then((r) => r.data),
   previewPlace: (input: string) =>
     apiFetch<ResolvedPlaceDto>("/api/private/google/quick-connect/preview", {
       method: "POST",

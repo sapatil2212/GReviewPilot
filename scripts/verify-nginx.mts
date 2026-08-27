@@ -174,6 +174,21 @@ check("prefixed so unrelated vhosts are never touched", vhostFilename("clinic.co
 check("filename matches the hostname", vhostFilename("clinic.com") === "greviewpilot-clinic.com.conf");
 check("filename is lowercased", vhostFilename("CLINIC.com") === "greviewpilot-clinic.com.conf");
 
+console.log("\nPlatform hostname resolution:");
+const { platformHostnames } = await import("../src/server/services/sslProvisioning.service");
+{
+  // With no explicit config, the primary is derived from APP_URL and the www
+  // counterpart is included by default.
+  const { primary, aliases } = platformHostnames();
+  check("primary is derived from APP_URL", primary.length > 0, primary);
+  check(
+    "www counterpart is included by default",
+    aliases.some((a) => a === `www.${primary}`),
+    aliases.join(","),
+  );
+  check("primary itself is never listed as its own alias", !aliases.includes(primary));
+}
+
 console.log("\nUpstream must never point back at nginx (proxy loop):");
 // The upstream used to be inferred from APP_URL. With a production
 // `https://app.example.com` that resolved to port 443, so every tenant vhost

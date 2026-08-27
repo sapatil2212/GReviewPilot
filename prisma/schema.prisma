@@ -338,8 +338,11 @@ enum PostCtaType {
 
 enum GoogleAccountStatus {
   CONNECTED
+  SYNCING
   DISCONNECTED
   TOKEN_EXPIRED
+  RATE_LIMITED
+  REAUTH_REQUIRED
   ERROR
 }
 
@@ -356,10 +359,13 @@ enum SyncKind {
 
 enum SyncStatus {
   PENDING
+  QUEUED
   RUNNING
+  RETRYING
   SUCCESS
   PARTIAL
   FAILED
+  CANCELLED
 }
 
 enum MediaCategory {
@@ -1137,14 +1143,22 @@ model SyncRun {
   id              String     @id @default(cuid())
   tenantId        String
   googleAccountId String?
+  /// Optional scope — sync a single mirrored GoogleLocation row.
+  googleLocationId String?
   kind            SyncKind
-  status          SyncStatus @default(PENDING)
+  status          SyncStatus @default(QUEUED)
+  priority        Int        @default(100)
   startedAt       DateTime   @default(now())
   finishedAt      DateTime?
+  lastAttemptAt   DateTime?
+  nextRetryAt     DateTime?
+  attemptCount    Int        @default(0)
+  totalItems      Int        @default(0)
   itemsProcessed  Int        @default(0)
   itemsCreated    Int        @default(0)
   itemsUpdated    Int        @default(0)
   itemsFailed     Int        @default(0)
+  lastErrorCode   String?
   errorMessage    String?    @db.Text
   triggeredById   String?
   metadata        Json?
@@ -1156,6 +1170,57 @@ model SyncRun {
   @@index([tenantId, kind])
   @@index([tenantId, startedAt])
   @@index([status])
+  @@index([status, nextRetryAt])
+  @@index([tenantId, googleAccountId, kind, status])
+}
+
+/// Distributed token-bucket state for Google API rate limiting.
+model GoogleApiQuotaBucket {
+  id           String   @id @default(cuid())
+  /// e.g. ACCOUNT_MANAGEMENT | BUSINESS_INFORMATION | REVIEWS | PERFORMANCE
+  apiName      String
+  projectKey   String   @default("default")
+  tokens       Float    @default(0)
+  capacity     Float
+  refillPerSec Float
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  @@unique([apiName, projectKey])
+  @@index([apiName])
+}
+
+/// Soft distributed lock for sync jobs (tenant+account, optional location).
+model GoogleSyncLock {
+  id        String   @id @default(cuid())
+  lockKey   String   @unique
+  ownerId   String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+/// Structured Google API request telemetry (no tokens / secrets / PII).
+model GoogleApiRequestLog {
+  id            String   @id @default(cuid())
+  requestId     String
+  tenantId      String?
+  googleAccountId String?
+  apiName       String
+  endpoint      String   @db.VarChar(500)
+  method        String   @db.VarChar(10)
+  statusCode    Int?
+  durationMs    Int
+  retryCount    Int      @default(0)
+  errorCategory String?
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([apiName, createdAt])
+  @@index([tenantId, createdAt])
+  @@index([errorCategory, createdAt])
 }
 
 // =========================================================

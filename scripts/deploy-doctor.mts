@@ -96,17 +96,82 @@ else warn("ACME_CONTACT_EMAIL unset", "the CA cannot warn you if renewals stop")
 // is nginx itself. Proxying there loops.
 pass("APP_UPSTREAM", env.APP_UPSTREAM);
 
-// Tenant DNS instructions are built from these two. A wrong value here is
-// invisible in the app and breaks every domain a tenant tries to connect.
+if (!env.SITES_ROOT_DOMAIN) {
+  console.log("  SITES_ROOT_DOMAIN unset — tenants get /s/<slug> only, no free subdomain.");
+}
+
+// =====================================================================
+heading("Platform hostname (APP_URL)");
+
+// APP_URL's hostname is THE platform host — every other hostname reaching this
+// app is routed as a tenant custom domain (middleware.ts isPlatformHost()) and
+// gets no dashboard, no marketing pages, nothing except /s/<slug> lookups. If it
+// does not resolve, or resolves to a different server, the app is unreachable at
+// its own address regardless of how correctly everything else is configured —
+// this is the exact failure that motivated this check.
+let platformHostname = "";
+try {
+  platformHostname = new URL(env.APP_URL).hostname;
+} catch {
+  fail("APP_URL is not a valid URL", env.APP_URL);
+}
+
+if (platformHostname) {
+  console.log(`  ${env.APP_URL}, platform host = "${platformHostname}"`);
+
+  const parts = platformHostname.split(".");
+  if (parts.length > 2) {
+    const apexOfPlatform = parts.slice(-2).join(".");
+    console.log(
+      `  Note: "${apexOfPlatform}" and "www.${apexOfPlatform}" are DIFFERENT hostnames from\n` +
+        `  the platform host above. If this app also serves a marketing site there, that\n` +
+        `  hostname needs to be the platform host (APP_URL) — not a second, separate one —\n` +
+        `  because middleware routes everything that is not the platform host as a tenant\n` +
+        `  custom domain and 404s it.`,
+    );
+  }
+
+  const dns = await import("node:dns/promises");
+  const resolver = new dns.Resolver({ timeout: 4000, tries: 2 });
+  resolver.setServers(["1.1.1.1", "8.8.8.8"]);
+  try {
+    const addrs = await resolver.resolve4(platformHostname);
+    pass(`${platformHostname} resolves publicly`, addrs.join(", "));
+    if (env.SITE_APEX_IP && /^\d{1,3}(\.\d{1,3}){3}$/.test(env.SITE_APEX_IP) && !addrs.includes(env.SITE_APEX_IP)) {
+      warn(
+        "platform hostname does not resolve to SITE_APEX_IP",
+        `${platformHostname} -> ${addrs.join(", ")}, but SITE_APEX_IP=${env.SITE_APEX_IP}. ` +
+          "Expected when they are genuinely different servers; otherwise this is a mismatch.",
+      );
+    }
+  } catch {
+    fail(
+      `${platformHostname} does not resolve (publicly, via 1.1.1.1/8.8.8.8)`,
+      "the app is unreachable at its own address from the public internet. Point an " +
+        "A record at this server's public IP, or change APP_URL to a hostname that already does.",
+    );
+  }
+
+  if (env.SSL_PROVISIONING === "nginx") {
+    const { platformHostnames } = await import("../src/server/services/sslProvisioning.service");
+    const { primary, aliases } = platformHostnames();
+    pass("platform certificate will cover", [primary, ...aliases].join(", "));
+    console.log(
+      "  Provisioned automatically by the hourly monitor and by: npm run ssl:provision -- --platform",
+    );
+  }
+}
+
+// =====================================================================
 heading("Tenant DNS targets");
-console.log(`  Apex domains   -> A     ${env.SITE_APEX_IP}`);
+
+// These are what tenants are told to create. A wrong value here is invisible in
+// the app itself and breaks every domain a tenant tries to connect — it only
+// shows up as "propagating forever" in the dashboard, days later.
+console.log(`  Root domains  -> A     ${env.SITE_APEX_IP}`);
 let cnameTarget = env.SITE_CNAME_TARGET;
 if (!cnameTarget) {
-  try {
-    cnameTarget = new URL(env.APP_URL).hostname;
-  } catch {
-    cnameTarget = "";
-  }
+  cnameTarget = platformHostname;
   warn(
     "SITE_CNAME_TARGET is unset",
     `falling back to APP_URL's hostname "${cnameTarget}" — set it explicitly so tenant DNS survives the dashboard moving`,
@@ -114,9 +179,11 @@ if (!cnameTarget) {
 } else {
   pass("SITE_CNAME_TARGET", cnameTarget);
 }
-console.log(`  Subdomains     -> CNAME ${cnameTarget || "(unresolvable)"}`);
+console.log(`  Subdomains    -> CNAME ${cnameTarget || "(unresolvable)"}`);
 
-if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cnameTarget)) {
+if (!cnameTarget) {
+  fail("no usable CNAME target", "neither SITE_CNAME_TARGET nor APP_URL produced one");
+} else if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cnameTarget)) {
   fail("CNAME target is an IP address", "a CNAME value must be a hostname, not an IP");
 } else if (cnameTarget.includes(":")) {
   fail("CNAME target contains a port", `"${cnameTarget}" — a CNAME value cannot include a port`);
@@ -127,7 +194,6 @@ if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cnameTarget)) {
   );
 }
 
-// The apex A record must be a real public IP, or apex domains can never verify.
 if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(env.SITE_APEX_IP)) {
   fail("SITE_APEX_IP is not an IPv4 address", env.SITE_APEX_IP);
 } else if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(env.SITE_APEX_IP)) {
@@ -138,29 +204,10 @@ if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(env.SITE_APEX_IP)) {
 } else if (env.SITE_APEX_IP === "76.76.21.21") {
   fail(
     "SITE_APEX_IP is still the Vercel default",
-    "set it to this server's public IP or apex domains will point at Vercel",
+    "set it to this server's public IP or root-domain tenants will point at Vercel",
   );
 } else {
   pass("SITE_APEX_IP looks like a public address", env.SITE_APEX_IP);
-}
-try {
-  const appHost = new URL(env.APP_URL).hostname;
-  pass("APP_URL", env.APP_URL);
-  console.log(`      platform host is "${appHost}" — every other hostname is treated as a tenant domain`);
-  const parts = appHost.split(".");
-  if (parts.length > 2) {
-    const apex = parts.slice(-2).join(".");
-    console.log(
-      `      note: "${apex}" and "www.${apex}" are NOT platform hosts. If you serve a\n` +
-        `      marketing site there from this app, it will be routed as a tenant domain and 404.`,
-    );
-  }
-} catch {
-  fail("APP_URL is not a valid URL", env.APP_URL);
-}
-
-if (!env.SITES_ROOT_DOMAIN) {
-  console.log("      SITES_ROOT_DOMAIN unset — tenants get /s/<slug> only, no free subdomain.");
 }
 
 // =====================================================================

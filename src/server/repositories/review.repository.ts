@@ -35,6 +35,9 @@ const SORTABLE = [
   "createdAt",
   "updatedAt",
   "starRating",
+  "status",
+  "sentiment",
+  "reviewerName",
 ] as const;
 
 export const reviewRepository = {
@@ -135,6 +138,16 @@ export const reviewRepository = {
             OR: [
               { comment: { contains: args.pagination.search } },
               { reviewerName: { contains: args.pagination.search } },
+              {
+                location: {
+                  name: { contains: args.pagination.search },
+                },
+              },
+              {
+                location: {
+                  city: { contains: args.pagination.search },
+                },
+              },
             ],
           }
         : {}),

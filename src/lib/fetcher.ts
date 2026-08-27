@@ -8,13 +8,21 @@ export class ApiClientError extends Error {
   readonly status: number;
   readonly code: string;
   readonly fields?: Record<string, string>;
+  readonly data?: unknown;
 
-  constructor(message: string, code: string, status: number, fields?: Record<string, string>) {
+  constructor(
+    message: string,
+    code: string,
+    status: number,
+    fields?: Record<string, string>,
+    data?: unknown,
+  ) {
     super(message);
     this.name = "ApiClientError";
     this.status = status;
     this.code = code;
     this.fields = fields;
+    this.data = data;
   }
 }
 
@@ -22,7 +30,12 @@ interface Envelope<T> {
   success: boolean;
   message?: string;
   data?: T;
-  error?: { code: string; message: string; fields?: Record<string, string> };
+  error?: {
+    code: string;
+    message: string;
+    fields?: Record<string, string>;
+    data?: unknown;
+  };
 }
 
 export async function apiFetch<T = unknown>(
@@ -51,6 +64,7 @@ export async function apiFetch<T = unknown>(
       err?.code ?? "UNKNOWN_ERROR",
       res.status,
       err?.fields,
+      err?.data,
     );
   }
   return { data: body.data as T, message: body.message };

@@ -41,6 +41,11 @@ import {
   InputOTPGroup,
   InputOTPSlot,
 } from "@/components/ui/input-otp";
+import { SubscribePlanModal, type TrialEndedPayload } from "@/components/auth/subscribe-plan-modal";
+import {
+  RestoreAccountModal,
+  type DeletedAccountPayload,
+} from "@/components/auth/restore-account-modal";
 import { z } from "zod";
 
 const loginSchema = z.object({
@@ -74,6 +79,20 @@ const signupStep1Schema = z
     message: "Passwords do not match",
     path: ["confirmPassword"],
   });
+
+/** Step 1 for Google OAuth — identity already verified; no password. */
+const googleSignupStep1Schema = z.object({
+  firstName: z.string().trim().min(1, "First name is required"),
+  lastName: z.string().trim().min(1, "Last name is required"),
+  businessName: z.string().trim().min(1, "Business name is required"),
+  businessWebsite: z.string().optional(),
+  businessPhone: z.string().optional(),
+  terms: z.literal(true, {
+    errorMap: () => ({
+      message: "You must agree to the Terms of Service & Privacy Policy",
+    }),
+  }),
+});
 
 const CATEGORIES = [
   "Coffee Shop & Café",
@@ -115,20 +134,156 @@ export default function AuthPage() {
 
 function AuthContent() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const mode = searchParams.get("mode") === "signup" ? "signup" : "login";
+  const googleReturn = searchParams.get("google") === "1";
+  const authError = searchParams.get("error");
 
   const [tab, setTab] = useState<"login" | "signup">(mode);
   const [loading, setLoading] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(googleReturn);
+  const [googleProfile, setGoogleProfile] = useState<GoogleSignupProfile | null>(
+    null,
+  );
+  const [showSubscribe, setShowSubscribe] = useState(false);
+  const [trialPayload, setTrialPayload] = useState<TrialEndedPayload | null>(null);
+  const [subscribeCredentials, setSubscribeCredentials] = useState<{
+    email: string;
+    password: string;
+  } | null>(null);
+  // Persisted across page loads so we can show "Last used" on the Google button.
+  const [lastUsedGoogle, setLastUsedGoogle] = useState(false);
+  // Shown when a Google-only user tries to log in with email+password.
+  const [googleOnlyBanner, setGoogleOnlyBanner] = useState(false);
+
+  useEffect(() => {
+    try {
+      setLastUsedGoogle(localStorage.getItem("grp_last_auth") === "google");
+    } catch {
+      /* localStorage unavailable in SSR or private mode */
+    }
+  }, []);
 
   useEffect(() => setTab(mode), [mode]);
+
+  useEffect(() => {
+    if (authError) {
+      const message =
+        authError === "OAuthAccountNotLinked"
+          ? "This email is already registered with a password. Sign in with email, or use the same Google account."
+          : authError === "AccessDenied"
+            ? "Google sign-in was denied. Please try again."
+            : authError === "TrialEnded"
+              ? "Your free trial has ended. Subscribe to a plan to continue."
+              : "Google sign-in failed. Please try again.";
+      toast.error(message);
+      if (authError === "TrialEnded") {
+        setTrialPayload({
+          email: searchParams.get("email") ?? undefined,
+        });
+        setShowSubscribe(true);
+      }
+      const url = new URL(window.location.href);
+      url.searchParams.delete("error");
+      url.searchParams.delete("email");
+      window.history.replaceState({}, "", url.pathname + url.search);
+    }
+  }, [authError, searchParams]);
+
+  // After Google OAuth (or when an incomplete Google signup revisits /auth),
+  // hydrate the wizard from /api/auth/me.
+  // Auth.js sets the session cookie during the OAuth callback redirect, but
+  // there is a race: the cookie may not be readable on the very first render.
+  // We retry a few times with a short delay before giving up.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const MAX_ATTEMPTS = googleReturn ? 4 : 1;
+      const RETRY_DELAY_MS = 800;
+
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        if (cancelled) return;
+        // Wait before retrying (not before first attempt).
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        }
+        if (cancelled) return;
+
+        try {
+          const { data } = await apiFetch<MeResponse>("/api/auth/me");
+          if (cancelled) return;
+
+          if (data.signupIncomplete && data.user) {
+            setGoogleProfile({
+              firstName: data.user.firstName ?? "",
+              lastName: data.user.lastName ?? "",
+              email: data.user.email,
+              avatar: data.user.avatar,
+            });
+            setTab("signup");
+            // Drop the query flag once we've absorbed the session.
+            if (googleReturn) {
+              const url = new URL(window.location.href);
+              url.searchParams.delete("google");
+              url.searchParams.set("mode", "signup");
+              window.history.replaceState({}, "", url.pathname + url.search);
+            }
+            if (!cancelled) setCheckingSession(false);
+            return;
+          } else if (googleReturn) {
+            // Fully signed-in user — go to dashboard.
+            router.replace("/dashboard");
+            return;
+          }
+          // Not a google return and signup is complete — nothing to do.
+          if (!cancelled) setCheckingSession(false);
+          return;
+        } catch {
+          // 401 or network error — retry if we have attempts left.
+          if (attempt === MAX_ATTEMPTS - 1) {
+            // All retries exhausted.
+            if (googleReturn && !cancelled) {
+              toast.error("Google sign-in didn't complete. Please try again.");
+            }
+            if (!cancelled) setCheckingSession(false);
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [googleReturn, router]);
+
+  function startGoogleAuth() {
+    setLoading(true);
+    try { localStorage.setItem("grp_last_auth", "google"); } catch { /* ignore */ }
+    setLastUsedGoogle(true);
+    // Unified return URL: incomplete signups resume the wizard; existing
+    // accounts continue to the dashboard via the hydrate effect above.
+    void signIn("google", { callbackUrl: "/auth?google=1" });
+  }
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">
+            {googleReturn ? "Finishing Google connection…" : "Loading…"}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-background">
       {/* Ambient mesh */}
-      <div className="pointer-events-none absolute inset-0 opacity-70">
-        <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-[#3B82F6]/25 blur-3xl" />
-        <div className="absolute top-40 -right-24 h-[28rem] w-[28rem] rounded-full bg-[#1D4ED8]/20 blur-3xl" />
-        <div className="absolute bottom-0 left-1/3 h-96 w-96 rounded-full bg-[#0F172A]/30 blur-3xl" />
+      <div className="pointer-events-none absolute inset-0 opacity-80">
+        <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-primary/20 blur-3xl animate-pulse-glow" />
+        <div className="absolute top-40 -right-24 h-[28rem] w-[28rem] rounded-full bg-secondary/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/3 h-96 w-96 rounded-full bg-accent/20 blur-3xl" />
       </div>
 
       {/* Top Page Header (Outside of form card) */}
@@ -160,62 +315,121 @@ function AuthContent() {
         }
       >
         <div className="w-full">
-          <div className="glass shadow-elevated rounded-3xl border border-border/60 bg-background/85 p-6 sm:p-8 backdrop-blur-xl">
+          <div className="glass shadow-elevated rounded-3xl border border-border/80 bg-background/90 p-6 sm:p-8 backdrop-blur-2xl">
 
             <div
               key={`header-${tab}`}
               className="mb-6 animate-in fade-in slide-in-from-top-3 duration-400 ease-out"
             >
-              <h2 className="text-2xl font-semibold tracking-tight">
-                {tab === "login" ? "Welcome back" : "Create your account"}
-              </h2>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {tab === "login"
-                  ? "Sign in to your GReviewPilot workspace."
-                  : "Start your 14-day trial. No credit card required."}
-              </p>
+              {tab === "login" ? (
+                <>
+                  <h2 className="text-2xl font-semibold tracking-tight">
+                    Welcome back
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Sign in to your GReviewPilot workspace.
+                  </p>
+                </>
+              ) : googleProfile ? (
+                <>
+                  <h2 className="text-2xl font-semibold tracking-tight">
+                    Finish setting up your workspace
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Your Google account is connected. Tell us about your business to continue.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h2 className="text-2xl font-semibold tracking-tight">
+                    Start your 7-day free trial
+                  </h2>
+                  <p className="mt-1.5 text-sm text-muted-foreground">
+                    Already have an account?{" "}
+                    <button
+                      type="button"
+                      onClick={() => setTab("login")}
+                      className="font-medium text-foreground underline-offset-4 transition hover:underline"
+                    >
+                      Sign in →
+                    </button>
+                  </p>
+                  <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3.5 py-1.5 text-xs font-medium text-emerald-800 dark:text-emerald-300">
+                    <span aria-hidden>🎉</span>
+                    <span>7 days free — no credit card, no catch</span>
+                  </div>
+                </>
+              )}
             </div>
 
-            {/* Sliding Animated Tabs */}
-            <div className="relative mb-6 grid grid-cols-2 gap-1 rounded-xl border border-border/60 bg-surface p-1">
-              <div
-                className={
-                  "absolute bottom-1 top-1 w-[calc(50%-4px)] rounded-lg bg-background shadow-sm transition-all duration-300 ease-out " +
-                  (tab === "login" ? "left-1" : "left-[calc(50%+2px)]")
-                }
-              />
-              {(["login", "signup"] as const).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
+            {/* Sliding Animated Tabs — hide while finishing Google signup */}
+            {!googleProfile && (
+              <div className="relative mb-6 grid grid-cols-2 gap-1 rounded-xl border border-border/60 bg-surface p-1">
+                <div
                   className={
-                    "relative z-10 rounded-lg px-3 py-2 text-sm font-medium transition-colors duration-200 " +
-                    (tab === t
-                      ? "text-foreground font-semibold"
-                      : "text-muted-foreground hover:text-foreground")
+                    "absolute bottom-1 top-1 w-[calc(50%-4px)] rounded-lg bg-background shadow-sm transition-all duration-300 ease-out " +
+                    (tab === "login" ? "left-1" : "left-[calc(50%+2px)]")
                   }
-                >
-                  {t === "login" ? "Log in" : "Sign up"}
-                </button>
-              ))}
-            </div>
+                />
+                {(["login", "signup"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTab(t)}
+                    className={
+                      "relative z-10 rounded-lg px-3 py-2 text-sm font-medium transition-colors duration-200 " +
+                      (tab === t
+                        ? "text-foreground font-semibold"
+                        : "text-muted-foreground hover:text-foreground")
+                    }
+                  >
+                    {t === "login" ? "Log in" : "7 Day Free Trial"}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div
-              key={`view-${tab}`}
+              key={`view-${tab}-${googleProfile ? "g" : "e"}`}
               className="animate-in fade-in zoom-in-95 duration-300 ease-out"
             >
               {tab === "login" ? (
                 <>
-                  {/* Google */}
                   <button
                     type="button"
+                    id="btn-continue-google"
                     disabled={loading}
-                    onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
-                    className="group flex w-full items-center justify-center gap-3 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-soft disabled:opacity-60"
+                    onClick={startGoogleAuth}
+                    className={
+                      "group relative flex w-full items-center justify-center gap-3 rounded-xl border px-4 py-2.5 text-sm font-medium shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-soft disabled:opacity-60 " +
+                      (googleOnlyBanner
+                        ? "border-blue-500 bg-blue-50 text-blue-700 ring-2 ring-blue-400/40 dark:bg-blue-950/40 dark:text-blue-300"
+                        : "border-border bg-background text-foreground hover:border-primary/40")
+                    }
                   >
                     <GoogleIcon />
-                    Continue with Google
+                    <span>Continue with Google</span>
+                    {lastUsedGoogle && !googleOnlyBanner && (
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">
+                        Last used
+                      </span>
+                    )}
+                    {googleOnlyBanner && (
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-blue-500/15 border border-blue-400/30 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300 animate-pulse">
+                        Sign in here ↑
+                      </span>
+                    )}
                   </button>
+
+                  {googleOnlyBanner && (
+                    <div className="flex items-start gap-2.5 rounded-xl border border-blue-400/40 bg-blue-50/80 dark:bg-blue-950/30 px-4 py-3 text-sm text-blue-700 dark:text-blue-300 animate-in fade-in slide-in-from-top-2 duration-300">
+                      <svg className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z" clipRule="evenodd" />
+                      </svg>
+                      <span>
+                        This account was created with Google. Use the <strong>Continue with Google</strong> button above to sign in.
+                      </span>
+                    </div>
+                  )}
 
                   <div className="my-5 flex items-center gap-3">
                     <div className="h-px flex-1 bg-border" />
@@ -225,36 +439,44 @@ function AuthContent() {
                     <div className="h-px flex-1 bg-border" />
                   </div>
 
-                  <LoginForm loading={loading} setLoading={setLoading} />
+                  <LoginForm
+                    loading={loading}
+                    setLoading={setLoading}
+                    onGoogleAccount={() => {
+                      setGoogleOnlyBanner(true);
+                      document.getElementById("btn-continue-google")?.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }}
+                    onTrialEnded={(payload, credentials) => {
+                      setTrialPayload(payload);
+                      setSubscribeCredentials(credentials);
+                      setShowSubscribe(true);
+                    }}
+                    onAccountDeleted={() => {
+                      /* handled inside LoginForm via local modal */
+                    }}
+                  />
                 </>
               ) : (
-                <SignupWizard loading={loading} setLoading={setLoading} />
+                <SignupWizard
+                  loading={loading}
+                  setLoading={setLoading}
+                  googleProfile={googleProfile}
+                  onStartGoogle={startGoogleAuth}
+                />
               )}
             </div>
 
-            <p className="mt-6 text-center text-xs text-muted-foreground">
-              {tab === "login" ? (
-                <>
-                  New to GReviewPilot?{" "}
-                  <button
-                    onClick={() => setTab("signup")}
-                    className="font-medium text-foreground underline underline-offset-4"
-                  >
-                    Create an account
-                  </button>
-                </>
-              ) : (
-                <>
-                  Already have an account?{" "}
-                  <button
-                    onClick={() => setTab("login")}
-                    className="font-medium text-foreground underline underline-offset-4"
-                  >
-                    Log in
-                  </button>
-                </>
-              )}
-            </p>
+            {!googleProfile && tab === "login" && (
+              <p className="mt-6 text-center text-xs text-muted-foreground">
+                New to GReviewPilot?{" "}
+                <button
+                  onClick={() => setTab("signup")}
+                  className="font-medium text-foreground underline underline-offset-4"
+                >
+                  Start 7 Day Free Trial
+                </button>
+              </p>
+            )}
 
             <p className="mt-4 text-center text-[11px] leading-relaxed text-muted-foreground">
               By continuing you agree to our{" "}
@@ -270,9 +492,48 @@ function AuthContent() {
           </div>
         </div>
       </div>
+
+      <SubscribePlanModal
+        open={showSubscribe}
+        payload={trialPayload}
+        credentials={subscribeCredentials}
+        blocking
+        onActivated={() => {
+          setShowSubscribe(false);
+          toast.success("Plan activated — welcome back");
+          router.push("/dashboard");
+          router.refresh();
+        }}
+      />
     </div>
   );
 }
+
+type GoogleSignupProfile = {
+  firstName: string;
+  lastName: string;
+  email: string;
+  avatar: string | null;
+};
+
+type MeResponse = {
+  user: {
+    id: string;
+    email: string;
+    firstName: string;
+    lastName: string;
+    avatar: string | null;
+    phone: string | null;
+    role: string;
+    emailVerified: boolean;
+  };
+  tenant: {
+    id: string;
+    name: string;
+    signupIncomplete: boolean;
+  } | null;
+  signupIncomplete: boolean;
+};
 
 function GoogleIcon() {
   return (
@@ -310,9 +571,17 @@ function FieldError({ msg }: { msg?: string }) {
 function LoginForm({
   loading,
   setLoading,
+  onGoogleAccount,
+  onTrialEnded,
 }: {
   loading: boolean;
   setLoading: (v: boolean) => void;
+  onGoogleAccount: () => void;
+  onTrialEnded: (
+    payload: TrialEndedPayload,
+    credentials: { email: string; password: string },
+  ) => void;
+  onAccountDeleted?: () => void;
 }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -321,6 +590,8 @@ function LoginForm({
   const [errors, setErrors] = useState<{ email?: string; password?: string }>(
     {},
   );
+  const [deletedPayload, setDeletedPayload] =
+    useState<DeletedAccountPayload | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -336,22 +607,43 @@ function LoginForm({
     setErrors({});
     setLoading(true);
     try {
-      const result = await signIn("credentials", {
-        email: parsed.data.email,
-        password: parsed.data.password,
-        redirect: false,
+      await apiFetch("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify(parsed.data),
       });
-      if (!result || result.error) {
-        // Auth.js hides specific errors under a generic "CredentialsSignin"
-        // code; map to a friendly message.
-        toast.error("Invalid email or password");
-        setErrors({ password: "Invalid email or password" });
-        return;
-      }
       toast.success("Signed in");
       router.push("/dashboard");
       router.refresh();
     } catch (err) {
+      if (err instanceof ApiClientError) {
+        if (err.code === "TRIAL_ENDED") {
+          toast.error(err.message);
+          onTrialEnded(
+            (err.data as TrialEndedPayload) ?? { email: parsed.data.email },
+            { email: parsed.data.email, password: parsed.data.password },
+          );
+          return;
+        }
+        if (err.code === "ACCOUNT_DELETED") {
+          toast.error(err.message);
+          const data = (err.data as DeletedAccountPayload | undefined) ?? {
+            email: parsed.data.email,
+          };
+          setDeletedPayload({
+            ...data,
+            email: data.email || parsed.data.email,
+          });
+          return;
+        }
+        if (err.code === "GOOGLE_ACCOUNT") {
+          // Google-only account — show the banner and highlight the Google button.
+          onGoogleAccount();
+          return;
+        }
+        toast.error(err.message);
+        setErrors({ password: err.message });
+        return;
+      }
       toast.error("Something went wrong. Please try again.");
       console.error(err);
     } finally {
@@ -360,6 +652,7 @@ function LoginForm({
   }
 
   return (
+    <>
     <form onSubmit={submit} noValidate className="space-y-4">
       <div>
         <label className="mb-1.5 block text-xs font-medium text-foreground">
@@ -441,29 +734,58 @@ function LoginForm({
         <span className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
       </button>
     </form>
+
+    {deletedPayload && (
+      <RestoreAccountModal
+        open
+        payload={deletedPayload}
+        password={password}
+        onClose={() => setDeletedPayload(null)}
+        onRestored={() => {
+          setDeletedPayload(null);
+          toast.success("Account restored");
+          router.push("/dashboard");
+          router.refresh();
+        }}
+        onTrialEnded={(data) => {
+          setDeletedPayload(null);
+          onTrialEnded(
+            (data as TrialEndedPayload) ?? { email },
+            { email, password },
+          );
+        }}
+      />
+    )}
+    </>
   );
 }
 
 function SignupWizard({
   loading,
   setLoading,
+  googleProfile,
+  onStartGoogle,
 }: {
   loading: boolean;
   setLoading: (v: boolean) => void;
+  googleProfile: GoogleSignupProfile | null;
+  onStartGoogle: () => void;
 }) {
   const router = useRouter();
+  const isGoogle = Boolean(googleProfile);
+  const totalSteps = isGoogle ? 2 : 3;
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
-  // Step 3 (OTP) state
+  // Step 3 (OTP) state — email signup only
   const [otp, setOtp] = useState("");
   const [otpError, setOtpError] = useState<string | undefined>();
   const [resending, setResending] = useState(false);
   const [otpResentAt, setOtpResentAt] = useState<number | null>(null);
 
   // Step 1 Form Data
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
-  const [email, setEmail] = useState("");
+  const [firstName, setFirstName] = useState(googleProfile?.firstName ?? "");
+  const [lastName, setLastName] = useState(googleProfile?.lastName ?? "");
+  const [email, setEmail] = useState(googleProfile?.email ?? "");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [businessName, setBusinessName] = useState("");
@@ -495,8 +817,37 @@ function SignupWizard({
     );
   }, [categoryQuery]);
 
+  useEffect(() => {
+    if (!googleProfile) return;
+    setFirstName(googleProfile.firstName);
+    setLastName(googleProfile.lastName);
+    setEmail(googleProfile.email);
+  }, [googleProfile]);
+
   function handleStep1Submit(e: React.FormEvent) {
     e.preventDefault();
+    if (isGoogle) {
+      const result = googleSignupStep1Schema.safeParse({
+        firstName,
+        lastName,
+        businessName,
+        businessWebsite,
+        businessPhone,
+        terms,
+      });
+      if (!result.success) {
+        const errMap: Record<string, string> = {};
+        result.error.issues.forEach((issue) => {
+          if (issue.path[0]) errMap[issue.path[0].toString()] = issue.message;
+        });
+        setErrors(errMap);
+        return;
+      }
+      setErrors({});
+      setStep(2);
+      return;
+    }
+
     const result = signupStep1Schema.safeParse({
       firstName,
       lastName,
@@ -523,9 +874,7 @@ function SignupWizard({
   }
 
   /**
-   * Step 2 → Step 3.
-   * We DON'T create the account here. We only request an email OTP;
-   * the account is created in Step 3 after the OTP is confirmed.
+   * Step 2 → finish (Google) or Step 3 OTP (email).
    */
   async function handleStep2Submit(e: React.FormEvent) {
     e.preventDefault();
@@ -534,6 +883,53 @@ function SignupWizard({
       return;
     }
     setErrors({});
+
+    if (isGoogle) {
+      setLoading(true);
+      try {
+        try {
+          sessionStorage.setItem(
+            "gp_onboarding",
+            JSON.stringify({ category, locations, achieve }),
+          );
+        } catch {
+          /* ignore quota errors */
+        }
+        await apiFetch("/api/auth/signup/google/complete", {
+          method: "POST",
+          body: JSON.stringify({
+            firstName,
+            lastName,
+            businessName,
+            businessWebsite: businessWebsite || undefined,
+            businessPhone: businessPhone || undefined,
+            category,
+            locations,
+            achieve,
+            acceptTerms: true,
+          }),
+        });
+        toast.success("Welcome to GReviewPilot");
+        router.push("/dashboard");
+        router.refresh();
+      } catch (err) {
+        if (err instanceof ApiClientError) {
+          if (err.fields) {
+            setErrors(err.fields);
+            setStep(1);
+            toast.error("Please review the highlighted fields.");
+          } else {
+            toast.error(err.message);
+          }
+        } else {
+          toast.error("Couldn't finish signup. Please try again.");
+        }
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     setLoading(true);
     try {
       await apiFetch<{ sent: boolean }>(
@@ -543,7 +939,6 @@ function SignupWizard({
           body: JSON.stringify({ email }),
         },
       );
-      // Stash onboarding preferences for the workspace setup module.
       try {
         sessionStorage.setItem(
           "gp_onboarding",
@@ -679,7 +1074,9 @@ function SignupWizard({
       <div className="mb-6 flex items-center justify-between border-b border-border/60 pb-3">
         <div className="text-xs font-semibold uppercase tracking-wider text-primary">
           {step === 1
-            ? "Step 1: Sign Up"
+            ? isGoogle
+              ? "Step 1: Business details"
+              : "Step 1: Account details"
             : step === 2
               ? "Step 2: Business Onboarding"
               : "Step 3: Verify your email"}
@@ -695,7 +1092,7 @@ function SignupWizard({
                   : "bg-emerald-500")
             }
           />
-          Step {step} of 3
+          Step {step} of {totalSteps}
         </div>
       </div>
 
@@ -706,6 +1103,66 @@ function SignupWizard({
           noValidate
           className="space-y-5 animate-in fade-in slide-in-from-right-4 duration-300"
         >
+          {!isGoogle && (
+            <>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={onStartGoogle}
+                className="group flex w-full items-center justify-center gap-3 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-soft disabled:opacity-60"
+              >
+                <GoogleIcon />
+                Sign up with Google
+              </button>
+              <div className="flex items-center gap-3">
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                  or with email
+                </span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+            </>
+          )}
+
+          {isGoogle && googleProfile && (
+            <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/5 p-4">
+              <div className="flex items-start gap-3">
+                <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-full border border-border bg-surface">
+                  {googleProfile.avatar ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={googleProfile.avatar}
+                      alt=""
+                      className="h-full w-full object-cover"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center">
+                      <User className="h-5 w-5 text-muted-foreground" />
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate text-sm font-semibold text-foreground">
+                      {firstName} {lastName}
+                    </p>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Google connected
+                    </span>
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                    {email}
+                  </p>
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                    Email verified by Google — no password or verification code needed.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Personal Information */}
           <div>
             <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
@@ -763,6 +1220,8 @@ function SignupWizard({
                 <FieldError msg={errors.lastName} />
               </div>
 
+              {!isGoogle && (
+                <>
               <div className="sm:col-span-2">
                 <label className="mb-1 block text-xs font-medium text-foreground">
                   Email *
@@ -891,10 +1350,12 @@ function SignupWizard({
                 </div>
                 <FieldError msg={errors.confirmPassword} />
               </div>
+                </>
+              )}
             </div>
 
             {/* Password strength */}
-            {password && (
+            {!isGoogle && password && (
               <div className="mt-2.5 space-y-1.5">
                 <div className="flex items-center gap-1.5">
                   {[0, 1, 2, 3, 4].map((i) => (
@@ -1208,7 +1669,7 @@ function SignupWizard({
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <>
-                  Complete Onboarding
+                  {isGoogle ? "Create workspace" : "Complete Onboarding"}
                   <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
                 </>
               )}

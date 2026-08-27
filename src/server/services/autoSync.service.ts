@@ -1,63 +1,62 @@
 /**
  * Auto-sync orchestrator (scheduled job).
  *
- * Walks every CONNECTED GoogleAccount whose last sync is older than the
- * configured interval and runs a location sync for it. Designed to be
- * driven by an external scheduler hitting /api/cron/auto-sync (Vercel
- * Cron, GitHub Actions, Task Scheduler, etc.) — there is no in-process
- * timer, so it stays correct on serverless and multi-instance deploys.
+ * Enqueues LOCATION sync jobs for CONNECTED Google accounts that are
+ * due — does NOT call Google APIs inline. Actual work is done by
+ * /api/cron/google-sync-worker under the global rate limiter.
  *
- * Each tenant is isolated: a failure for one never aborts the rest.
+ * Tenant start times are jittered so thousands of tenants don't fire
+ * at the same clock minute.
  */
 
-import { GoogleAccountStatus, UserRole } from "@prisma/client";
+import { GoogleAccountStatus, SyncKind } from "@prisma/client";
+import { createHash } from "node:crypto";
 import { prisma } from "@/server/db/prisma";
-import { googleLocationSyncService } from "@/server/services/google/googleLocationSync.service";
+import { syncJobService } from "@/server/google/sync/syncJob.service";
+import { runGoogleSyncWorker } from "@/server/google/sync/worker";
+import {
+  pruneGoogleTelemetry,
+  type RetentionReport,
+} from "@/server/google/sync/retention";
 import { env } from "@/server/utils/env";
 import { logger } from "@/server/utils/logger";
-import type { AuthContext } from "@/server/auth/requireSession";
 
 export interface AutoSyncReport {
   checked: number;
-  synced: number;
+  queued: number;
   skipped: number;
   failed: number;
+  worker?: Awaited<ReturnType<typeof runGoogleSyncWorker>>;
+  retention?: RetentionReport;
   details: Array<{
     tenantId: string;
-    status: "synced" | "skipped" | "failed";
+    status: "queued" | "skipped" | "failed";
     reason?: string;
+    jobId?: string;
   }>;
 }
 
-/**
- * Build a synthetic auth context for a background run. The sync service
- * only needs tenantId (scoping) and userId (audit attribution).
- */
-function systemContext(
-  tenantId: string,
-  userId: string,
-  email: string,
-): AuthContext {
-  return {
-    userId,
-    tenantId,
-    role: UserRole.SUPER_ADMIN,
-    sessionId: "system-cron",
-    email,
-    firstName: "System",
-    lastName: "Cron",
-  };
+/** Deterministic jitter 0..intervalMs based on tenant id. */
+function tenantJitterMs(tenantId: string, intervalMs: number): number {
+  const hash = createHash("sha256").update(tenantId).digest();
+  const n = hash.readUInt32BE(0);
+  return n % Math.max(1, intervalMs);
 }
 
 export async function runAutoSync(
   opts: { force?: boolean; tenantId?: string } = {},
 ): Promise<AutoSyncReport> {
   const intervalMs = env.AUTO_SYNC_INTERVAL_MINUTES * 60 * 1000;
-  const cutoff = new Date(Date.now() - intervalMs);
 
   const accounts = await prisma.googleAccount.findMany({
     where: {
-      status: GoogleAccountStatus.CONNECTED,
+      status: {
+        in: [
+          GoogleAccountStatus.CONNECTED,
+          GoogleAccountStatus.RATE_LIMITED,
+          GoogleAccountStatus.SYNCING,
+        ],
+      },
       ...(opts.tenantId ? { tenantId: opts.tenantId } : {}),
     },
     select: {
@@ -71,82 +70,87 @@ export async function runAutoSync(
 
   const report: AutoSyncReport = {
     checked: accounts.length,
-    synced: 0,
+    queued: 0,
     skipped: 0,
     failed: 0,
     details: [],
   };
 
-  for (const acc of accounts) {
-    // Respect the interval unless explicitly forced.
-    if (!opts.force && acc.lastSyncedAt && acc.lastSyncedAt > cutoff) {
-      report.skipped += 1;
-      report.details.push({
-        tenantId: acc.tenantId,
-        status: "skipped",
-        reason: "synced recently",
-      });
-      continue;
-    }
+  const now = Date.now();
 
-    // Attribute the run to whoever connected the account; fall back to
-    // any owner/admin so audit rows always resolve to a real user.
-    let userId = acc.connectedById;
-    if (!userId) {
-      const fallback = await prisma.user.findFirst({
-        where: {
+  for (const acc of accounts) {
+    const jitter = tenantJitterMs(acc.tenantId, intervalMs);
+    // Effective due time = lastSyncedAt + interval + jitter offset within window
+    if (!opts.force && acc.lastSyncedAt) {
+      const dueAt = acc.lastSyncedAt.getTime() + intervalMs + jitter;
+      if (now < dueAt) {
+        report.skipped += 1;
+        report.details.push({
           tenantId: acc.tenantId,
-          role: { in: [UserRole.TENANT_OWNER, UserRole.ADMIN] },
-        },
-        select: { id: true },
-      });
-      userId = fallback?.id ?? null;
-    }
-    if (!userId) {
-      report.skipped += 1;
-      report.details.push({
-        tenantId: acc.tenantId,
-        status: "skipped",
-        reason: "no user to attribute the run to",
-      });
-      continue;
+          status: "skipped",
+          reason: "synced recently (jittered interval)",
+        });
+        continue;
+      }
     }
 
     try {
-      const ctx = systemContext(acc.tenantId, userId, acc.email);
-      // `runFor` records its own SyncRun row and never throws for
-      // per-item failures; it returns the completed/failed run.
-      const run = await googleLocationSyncService.runFor(
-        ctx,
-        new Request(`${env.APP_URL}/api/cron/auto-sync`),
-      );
-      if (run.status === "FAILED") {
-        report.failed += 1;
+      const delayMs = 500 + (jitter % 30_000);
+      const { job, created } = await syncJobService.enqueue({
+        tenantId: acc.tenantId,
+        googleAccountId: acc.id,
+        kind: SyncKind.LOCATIONS,
+        triggeredById: acc.connectedById,
+        priority: 150,
+        delayMs,
+        metadata: { source: "auto_sync" },
+      });
+
+      if (created) {
+        report.queued += 1;
         report.details.push({
           tenantId: acc.tenantId,
-          status: "failed",
-          reason: run.errorMessage ?? "sync failed",
+          status: "queued",
+          jobId: job.id,
         });
       } else {
-        report.synced += 1;
-        report.details.push({ tenantId: acc.tenantId, status: "synced" });
+        report.skipped += 1;
+        report.details.push({
+          tenantId: acc.tenantId,
+          status: "skipped",
+          reason: "active job already exists",
+          jobId: job.id,
+        });
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      logger.warn("Auto-sync failed for tenant", {
+      logger.warn("Auto-sync enqueue failed", {
         tenantId: acc.tenantId,
         err: reason,
       });
       report.failed += 1;
-      report.details.push({ tenantId: acc.tenantId, status: "failed", reason });
+      report.details.push({
+        tenantId: acc.tenantId,
+        status: "failed",
+        reason,
+      });
     }
   }
 
-  logger.info("Auto-sync run complete", {
+  // Process a batch of due jobs in this same cron tick.
+  report.worker = await runGoogleSyncWorker();
+
+  // Housekeeping rides on the lower-frequency cron rather than the worker
+  // tick, and never throws — a retention failure must not fail the sync run.
+  report.retention = await pruneGoogleTelemetry();
+
+  logger.info("Auto-sync enqueue complete", {
     checked: report.checked,
-    synced: report.synced,
+    queued: report.queued,
     skipped: report.skipped,
     failed: report.failed,
+    worker: report.worker,
+    retention: report.retention,
   });
 
   return report;

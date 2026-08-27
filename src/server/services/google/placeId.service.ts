@@ -18,7 +18,11 @@
  * Google's Place ID Finder. We never guess.
  */
 
-import { env, placesApiEnabled } from "@/server/utils/env";
+import { placesApiEnabled } from "@/server/utils/env";
+import {
+  placesGetLegacy,
+  placesGetNew,
+} from "@/server/google/gateway/placesGateway";
 import { logger } from "@/server/utils/logger";
 import { ValidationError } from "@/server/utils/errors";
 
@@ -46,7 +50,7 @@ const PLACE_ID_RE = /^[A-Za-z0-9_-]{15,512}$/;
 
 /**
  * Extract a Place ID from arbitrary user input (raw ID or Maps URL).
- * Returns null if none can be found reliably.
+ * Synchronous parser for explicit URLs or raw IDs.
  */
 export function extractPlaceId(input: string): string | null {
   const trimmed = input.trim();
@@ -82,11 +86,45 @@ export function extractPlaceId(input: string): string | null {
   const anyMatch = trimmed.match(/place_id:([A-Za-z0-9_-]{15,512})/);
   if (anyMatch) return anyMatch[1]!;
 
-  // Some URLs embed "!1sChIJ..." in the data param.
-  const dataMatch = trimmed.match(/!1s(ChIJ[A-Za-z0-9_-]{10,})/);
+  // Some URLs embed "!1s(ChIJ...)" or "!1s(0x...)" in the data param.
+  const dataMatch = trimmed.match(/!1s(ChI[A-Za-z0-9_-]{10,})/);
   if (dataMatch) return dataMatch[1]!;
 
+  // Match ChIJ / GhIJ anywhere in the URL query or path
+  const chijMatch = trimmed.match(/(ChI[A-Za-z0-9_-]{20,})/);
+  if (chijMatch) return chijMatch[1]!;
+
   return null;
+}
+
+/**
+ * Expand short URLs (e.g. maps.app.goo.gl or goo.gl/maps) by following HTTP redirects.
+ */
+async function expandShortUrl(input: string): Promise<string> {
+  const trimmed = input.trim();
+  if (
+    trimmed.includes("maps.app.goo.gl") ||
+    trimmed.includes("goo.gl/maps") ||
+    trimmed.includes("g.co/maps")
+  ) {
+    try {
+      const res = await fetch(trimmed, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+      });
+      return res.url || trimmed;
+    } catch (err) {
+      logger.warn("Failed to expand short Maps URL", {
+        url: trimmed,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return trimmed;
 }
 
 /**
@@ -113,22 +151,8 @@ export async function verifyPlaceId(placeId: string): Promise<ResolvedPlace> {
 
 /** Places API (New): GET https://places.googleapis.com/v1/places/{id} */
 async function verifyViaNewApi(placeId: string): Promise<ResolvedPlace | null> {
-  try {
-    const res = await fetch(
-      `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
-      {
-        headers: {
-          "X-Goog-Api-Key": env.GOOGLE_MAPS_API_KEY,
-          "X-Goog-FieldMask":
-            "id,displayName,formattedAddress,rating,userRatingCount,addressComponents,primaryTypeDisplayName,types,editorialSummary,websiteUri,internationalPhoneNumber",
-        },
-      },
-    );
-    if (!res.ok) {
-      logger.info("Places (new) verify non-OK", { status: res.status });
-      return null;
-    }
-    const data = (await res.json()) as {
+  {
+    const { data } = await placesGetNew<{
       displayName?: { text?: string };
       formattedAddress?: string;
       rating?: number;
@@ -139,7 +163,13 @@ async function verifyViaNewApi(placeId: string): Promise<ResolvedPlace | null> {
       websiteUri?: string;
       internationalPhoneNumber?: string;
       addressComponents?: Array<{ longText?: string; types?: string[] }>;
-    };
+    }>({
+      placeId,
+      fieldMask:
+        "id,displayName,formattedAddress,rating,userRatingCount,addressComponents,primaryTypeDisplayName,types,editorialSummary,websiteUri,internationalPhoneNumber",
+    });
+    if (!data) return null;
+
     const comps = data.addressComponents ?? [];
     const city =
       comps.find((c) => c.types?.includes("locality"))?.longText ??
@@ -163,30 +193,14 @@ async function verifyViaNewApi(placeId: string): Promise<ResolvedPlace | null> {
       websiteUri: data.websiteUri ?? null,
       phone: data.internationalPhoneNumber ?? null,
     };
-  } catch (err) {
-    logger.warn("Places (new) verify failed", {
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return null;
   }
 }
 
 /** Legacy Place Details: GET /maps/api/place/details/json */
 async function verifyViaLegacyApi(placeId: string): Promise<ResolvedPlace | null> {
-  try {
-    const url = new URL(
-      "https://maps.googleapis.com/maps/api/place/details/json",
-    );
-    url.searchParams.set("place_id", placeId);
-    url.searchParams.set(
-      "fields",
-      "name,formatted_address,address_components,rating,user_ratings_total,place_id",
-    );
-    url.searchParams.set("key", env.GOOGLE_MAPS_API_KEY);
-
-    const res = await fetch(url.toString());
-    const data = (await res.json()) as {
-      status: string;
+  {
+    const { data } = await placesGetLegacy<{
+      status?: string;
       result?: {
         name?: string;
         formatted_address?: string;
@@ -195,14 +209,17 @@ async function verifyViaLegacyApi(placeId: string): Promise<ResolvedPlace | null
         address_components?: Array<{ long_name: string; types: string[] }>;
       };
       error_message?: string;
-    };
-    if (data.status !== "OK" || !data.result) {
-      logger.info("Places (legacy) verify non-OK", {
-        status: data.status,
-        message: data.error_message,
-      });
-      return null;
-    }
+    }>({
+      path: "place/details/json",
+      params: {
+        place_id: placeId,
+        fields:
+          "name,formatted_address,address_components,rating,user_ratings_total,place_id",
+      },
+    });
+
+    if (!data?.result) return null;
+
     const comps = data.result.address_components ?? [];
     const city =
       comps.find((c) => c.types.includes("locality"))?.long_name ??
@@ -221,11 +238,6 @@ async function verifyViaLegacyApi(placeId: string): Promise<ResolvedPlace | null
       rating: data.result.rating ?? null,
       userRatingsTotal: data.result.user_ratings_total ?? null,
     };
-  } catch (err) {
-    logger.warn("Places (legacy) verify failed", {
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return null;
   }
 }
 
@@ -234,10 +246,11 @@ async function verifyViaLegacyApi(placeId: string): Promise<ResolvedPlace | null
  * helpful message when no Place ID can be extracted.
  */
 export async function resolvePlace(input: string): Promise<ResolvedPlace> {
-  const placeId = extractPlaceId(input);
+  const expanded = await expandShortUrl(input);
+  const placeId = extractPlaceId(expanded) ?? extractPlaceId(input);
   if (!placeId) {
     throw new ValidationError(
-      "Couldn't find a Place ID in that input. Paste a raw Place ID, or use Google's Place ID Finder (https://developers.google.com/maps/documentation/places/web-service/place-id) and paste the ID here.",
+      "Couldn't find a Place ID in that input. Please paste a direct Google Maps URL or raw Place ID. You can find your Place ID using Google's Place ID Finder: https://developers.google.com/maps/documentation/places/web-service/place-id",
     );
   }
   return verifyPlaceId(placeId);

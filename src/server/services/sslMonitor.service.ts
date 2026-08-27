@@ -21,6 +21,7 @@ import { RENEWAL_WARNING_DAYS } from "@/server/services/tlsCertificate.service";
 import {
   provisionCertificate,
   provisioningEnabled,
+  provisionPlatformCertificates,
 } from "@/server/services/sslProvisioning.service";
 import { acmeChallengeStore } from "@/server/services/acme/challengeStore";
 import { logger } from "@/server/utils/logger";
@@ -100,6 +101,32 @@ export async function runSslMonitor(
   // Expired challenge rows accumulate from abandoned orders; swept here so no
   // separate job is needed for them.
   await acmeChallengeStore.sweep().catch(() => 0);
+
+  // The platform's own certificate renews on the same schedule as every
+  // tenant's — nobody should have to remember to do this by hand, and it is the
+  // certificate this deployment's own uptime depends on.
+  if (provisioningEnabled()) {
+    const platformResults = await provisionPlatformCertificates().catch((err) => {
+      logger.error("Platform certificate provisioning failed", {
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    });
+    for (const result of platformResults) {
+      if (result.action === "issued" || result.action === "renewed") {
+        report.renewed += 1;
+        logger.info("Platform certificate renewed", {
+          hostname: result.hostname,
+          notAfter: result.notAfter?.toISOString() ?? null,
+        });
+      } else if (result.action === "failed") {
+        logger.error("Platform certificate provisioning failed", {
+          hostname: result.hostname,
+          reason: result.reason,
+        });
+      }
+    }
+  }
 
   for (let i = 0; i < domains.length; i += CONCURRENCY) {
     const batch = domains.slice(i, i + CONCURRENCY);

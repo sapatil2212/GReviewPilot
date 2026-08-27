@@ -3,6 +3,8 @@
 /**
  * Quick Connect tab — attach a Google Place ID (via Maps URL or raw ID)
  * without OAuth. Enables the AI review funnel for any business.
+ *
+ * Connected locations stay listed until the user disconnects them.
  */
 
 import { useState } from "react";
@@ -10,17 +12,20 @@ import { toast } from "sonner";
 import {
   CheckCircle2,
   ExternalLink,
+  Link2Off,
   Loader2,
   MapPin,
   Search,
   Sparkles,
   Star,
 } from "lucide-react";
+import { ConfirmDialog } from "@/components/dashboard/confirm-dialog";
 import { Field, Input, Select, Textarea } from "@/components/dashboard/field";
 import { useApi } from "@/lib/api/useApi";
 import {
   googleApi,
   locationsApi,
+  type LocationDto,
   type ResolvedPlaceDto,
 } from "@/lib/api";
 
@@ -44,8 +49,20 @@ export function QuickConnectTab() {
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState<{ locationSlug: string } | null>(null);
 
+  const [disconnectTarget, setDisconnectTarget] = useState<LocationDto | null>(
+    null,
+  );
+  const [disconnecting, setDisconnecting] = useState(false);
+
+  const connected = useApi(() => googleApi.listQuickConnected(), []);
   const locations = useApi(
-    () => locationsApi.list({ pageSize: 100, status: "ACTIVE", sortBy: "name", sortDir: "asc" }),
+    () =>
+      locationsApi.list({
+        pageSize: 100,
+        status: "ACTIVE",
+        sortBy: "name",
+        sortDir: "asc",
+      }),
     [],
   );
   const session = useApi(async () => {
@@ -102,11 +119,27 @@ export function QuickConnectTab() {
       });
       toast.success("Connected — review funnel is live for this location");
       setDone({ locationSlug: result.location.slug });
-      await locations.refresh();
+      await Promise.all([connected.refresh(), locations.refresh()]);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Connect failed");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    if (!disconnectTarget) return;
+    setDisconnecting(true);
+    try {
+      await googleApi.disconnectQuickConnect(disconnectTarget.id);
+      toast.success("Disconnected — Place ID removed from this location");
+      setDisconnectTarget(null);
+      if (done?.locationSlug === disconnectTarget.slug) setDone(null);
+      await Promise.all([connected.refresh(), locations.refresh()]);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Disconnect failed");
+    } finally {
+      setDisconnecting(false);
     }
   }
 
@@ -116,8 +149,118 @@ export function QuickConnectTab() {
       ? `${window.location.origin}/review/${tenantSlug}/${done.locationSlug}`
       : null;
 
+  function locationFunnelLink(slug: string) {
+    if (!tenantSlug || typeof window === "undefined") return null;
+    return `${window.location.origin}/review/${tenantSlug}/${slug}`;
+  }
+
+  const connectedItems = connected.data?.items ?? [];
+
   return (
     <div className="space-y-4">
+      {/* Persistent connected list */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-900">
+            Connected locations
+          </h3>
+          <span className="text-xs text-slate-500">
+            {connected.data?.total ?? 0} linked
+          </span>
+        </div>
+
+        {connected.loading ? (
+          <div className="text-xs text-slate-500">Loading…</div>
+        ) : connectedItems.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center">
+            <MapPin className="mx-auto h-5 w-5 text-slate-400" />
+            <p className="mt-2 text-xs font-semibold text-slate-700">
+              No Quick Connect locations yet
+            </p>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Paste a Maps link or Place ID below. Connected places stay listed
+              here until you disconnect them.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Location</th>
+                  <th className="px-3 py-2">Place ID</th>
+                  <th className="px-3 py-2">Review funnel</th>
+                  <th className="px-3 py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {connectedItems.map((row) => {
+                  const link = locationFunnelLink(row.slug);
+                  return (
+                    <tr
+                      key={row.id}
+                      className="border-b border-slate-100 last:border-none"
+                    >
+                      <td className="px-3 py-2.5">
+                        <div className="font-semibold text-slate-900">
+                          {row.name}
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          {[row.city, row.country].filter(Boolean).join(", ") ||
+                            "—"}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <div className="max-w-[200px] break-all font-mono text-[10px] text-slate-500">
+                          {row.googlePlaceId}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {link ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(link);
+                                toast.success("Copied");
+                              }}
+                              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              Copy link
+                            </button>
+                            <a
+                              href={link}
+                              target="_blank"
+                              rel="noopener"
+                              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              Open
+                            </a>
+                          </div>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setDisconnectTarget(row)}
+                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50"
+                        >
+                          <Link2Off className="h-3 w-3" />
+                          Disconnect
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       {/* Step 1 — input */}
       <div className="rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50/60 to-white p-5">
         <div className="flex items-center gap-2">
@@ -247,7 +390,10 @@ export function QuickConnectTab() {
           {/* Attach options */}
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Attach to">
-              <Select value={mode} onChange={(e) => setMode(e.target.value as "new" | "existing")}>
+              <Select
+                value={mode}
+                onChange={(e) => setMode(e.target.value as "new" | "existing")}
+              >
                 <option value="new">Create a new location</option>
                 <option value="existing">An existing location</option>
               </Select>
@@ -442,6 +588,23 @@ export function QuickConnectTab() {
           </button>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!disconnectTarget}
+        title="Disconnect this location?"
+        description={
+          disconnectTarget
+            ? `Removes the Google Place ID from “${disconnectTarget.name}”. The location stays in your workspace; the review funnel will stop working until you reconnect.`
+            : undefined
+        }
+        destructive
+        confirmLabel="Disconnect"
+        loading={disconnecting}
+        onConfirm={handleDisconnect}
+        onCancel={() => {
+          if (!disconnecting) setDisconnectTarget(null);
+        }}
+      />
     </div>
   );
 }

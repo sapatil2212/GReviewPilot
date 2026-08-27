@@ -64,8 +64,10 @@ async function handle(req: NextRequest) {
     const tenantId = url.searchParams.get("tenantId") ?? undefined;
 
     const report = await runAutoSync({ force, tenantId });
+    // `queued`, not `synced`: this endpoint enqueues jobs and never syncs
+    // inline, and there has never been a `synced` field to read.
     return ok(report, {
-      message: `Auto-sync: ${report.synced} synced, ${report.skipped} skipped, ${report.failed} failed`,
+      message: `Auto-sync: ${report.queued} queued, ${report.skipped} skipped, ${report.failed} failed`,
     });
   } catch (err) {
     return handleError(err);

@@ -10,6 +10,7 @@ import {
   Archive,
   ArchiveRestore,
   MessageSquare,
+  RefreshCw,
   Search,
   Send,
   Sparkles,
@@ -28,12 +29,33 @@ const STATUSES = ["", "NEW", "REPLIED", "ARCHIVED", "FLAGGED"] as const;
 const RATINGS = ["", "1", "2", "3", "4", "5"] as const;
 const SENTIMENTS = ["", "POSITIVE", "NEUTRAL", "NEGATIVE", "MIXED"] as const;
 
+/** Combined sort presets — maps to API sortBy + sortDir. */
+const SORT_OPTIONS = [
+  { value: "reviewCreatedAt:desc", label: "Newest first" },
+  { value: "reviewCreatedAt:asc", label: "Oldest first" },
+  { value: "starRating:desc", label: "Highest rating" },
+  { value: "starRating:asc", label: "Lowest rating" },
+  { value: "updatedAt:desc", label: "Recently updated" },
+  { value: "status:asc", label: "Status (A–Z)" },
+  { value: "sentiment:asc", label: "Sentiment" },
+  { value: "reviewerName:asc", label: "Reviewer name" },
+] as const;
+
+function parseSort(value: string): { sortBy: string; sortDir: "asc" | "desc" } {
+  const [sortBy, sortDir] = value.split(":");
+  return {
+    sortBy: sortBy || "reviewCreatedAt",
+    sortDir: sortDir === "asc" ? "asc" : "desc",
+  };
+}
+
 export default function ReviewsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [minRating, setMinRating] = useState("");
   const [sentiment, setSentiment] = useState("");
+  const [sort, setSort] = useState<string>("reviewCreatedAt:desc");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [replyTo, setReplyTo] = useState<ReviewDto | null>(null);
   const [bulkReplyOpen, setBulkReplyOpen] = useState(false);
@@ -41,6 +63,9 @@ export default function ReviewsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const { sortBy, sortDir } = parseSort(sort);
 
   const list = useApi(
     () =>
@@ -51,10 +76,10 @@ export default function ReviewsPage() {
         status: status || undefined,
         minRating: minRating ? Number(minRating) : undefined,
         sentiment: sentiment || undefined,
-        sortBy: "reviewCreatedAt",
-        sortDir: "desc",
+        sortBy,
+        sortDir,
       }),
-    [page, search, status, minRating, sentiment],
+    [page, search, status, minRating, sentiment, sortBy, sortDir],
   );
 
   const stats = useApi(() => reviewsApi.stats(), []);
@@ -72,6 +97,47 @@ export default function ReviewsPage() {
    * Backfill sentiment in batches. The endpoint caps each call, so we
    * loop until nothing is left (bounded, to avoid a runaway client loop).
    */
+  async function handleSyncReviews() {
+    setSyncing(true);
+    try {
+      const res = await reviewsApi.sync();
+      if (res.queued) {
+        toast.message(
+          res.message ?? "Review sync queued — running in the background",
+        );
+      } else {
+        const parts: string[] = [];
+        if (res.removedSeeds > 0) {
+          parts.push(
+            `removed ${res.removedSeeds} demo review${res.removedSeeds === 1 ? "" : "s"}`,
+          );
+        }
+        if (res.created > 0 || res.updated > 0) {
+          parts.push(`${res.created} new, ${res.updated} updated`);
+        } else if (res.processed === 0 && res.removedSeeds === 0) {
+          parts.push("no new reviews from Google");
+        } else {
+          parts.push(`${res.processed} processed`);
+        }
+        if (res.placeRatingsTotal != null) {
+          parts.push(
+            `Google profile: ${res.placeAverageRating ?? "—"}★ · ${res.placeRatingsTotal.toLocaleString()} total`,
+          );
+        }
+        toast.success(`Sync complete — ${parts.join("; ")}`);
+        for (const w of res.warnings?.slice(0, 2) ?? []) {
+          toast.message(w, { duration: 8000 });
+        }
+      }
+      await list.refresh();
+      await stats.refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   async function handleAnalyzeSentiment() {
     setAnalyzing(true);
     try {
@@ -175,6 +241,17 @@ export default function ReviewsPage() {
               </>
             )}
             <button
+              onClick={handleSyncReviews}
+              disabled={syncing}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+              title="Fetch latest reviews from connected Google locations"
+            >
+              <RefreshCw
+                className={"h-3.5 w-3.5 " + (syncing ? "animate-spin" : "")}
+              />
+              {syncing ? "Syncing…" : "Sync reviews"}
+            </button>
+            <button
               onClick={handleAnalyzeSentiment}
               disabled={analyzing}
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
@@ -221,7 +298,7 @@ export default function ReviewsPage() {
 
       {/* Filters */}
       <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-3 sm:p-4">
-        <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto_auto]">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_auto_auto_auto_auto]">
           <Field label="Search">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
@@ -231,7 +308,7 @@ export default function ReviewsPage() {
                   setPage(1);
                   setSearch(e.target.value);
                 }}
-                placeholder="Reviewer name or comment"
+                placeholder="Reviewer, comment, or location"
                 className="pl-8"
               />
             </div>
@@ -275,6 +352,21 @@ export default function ReviewsPage() {
               ))}
             </Select>
           </Field>
+          <Field label="Sort by">
+            <Select
+              value={sort}
+              onChange={(e) => {
+                setPage(1);
+                setSort(e.target.value);
+              }}
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
         </div>
       </div>
 
@@ -287,7 +379,7 @@ export default function ReviewsPage() {
             <EmptyState
               icon={Star}
               title="No reviews yet"
-              description="Once you sync your Google Business Profile or add manual reviews, they'll appear here."
+              description="Click Sync reviews to pull from Google. Quick Connect imports up to 5 Places reviews; Official Google Business syncs the full review history."
             />
           </div>
         ) : (

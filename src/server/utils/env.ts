@@ -25,15 +25,35 @@ const EnvSchema = z.object({
     .optional()
     .transform((v) => v === "true"),
 
+  // Super Admin
+  SUPER_ADMIN_USER: z.string().optional().default("contactgreviewpilot@gmail.com"),
+  SUPER_ADMIN_PASSWORD: z.string().optional().default("greviewpilot@2026"),
+  SUPER_ADMIN_SECRET: z.string().optional().default("123"),
+
   // Google OAuth (optional in dev — feature-flagged in the config)
   GOOGLE_CLIENT_ID: z.string().optional().default(""),
   GOOGLE_CLIENT_SECRET: z.string().optional().default(""),
-  GOOGLE_REDIRECT_URI: z.string().optional().default(""),
+  // Must match an Authorized redirect URI on the OAuth client *byte for
+  // byte*, including scheme and trailing path. A mismatch is rejected by
+  // Google before our code runs, so validate the shape here.
+  GOOGLE_REDIRECT_URI: z
+    .string()
+    .optional()
+    .default("")
+    .refine(
+      (v) => v === "" || /^https?:\/\/.+/.test(v),
+      "GOOGLE_REDIRECT_URI must be an absolute http(s) URL, e.g. https://app.example.com/api/google/callback",
+    ),
   GOOGLE_BUSINESS_SCOPES: z
     .string()
     .optional()
     .default(
       "openid email profile https://www.googleapis.com/auth/business.manage",
+    )
+    .refine(
+      (v) => v.includes("https://www.googleapis.com/auth/business.manage"),
+      "GOOGLE_BUSINESS_SCOPES must include https://www.googleapis.com/auth/business.manage — " +
+        "every Business Profile API call depends on it",
     ),
 
   // Symmetric key for encrypting Google OAuth tokens etc. Optional —
@@ -58,6 +78,35 @@ const EnvSchema = z.object({
   CRON_SECRET: z.string().optional().default(""),
   // How stale a Google connection must be before auto-sync re-runs it.
   AUTO_SYNC_INTERVAL_MINUTES: z.coerce.number().int().positive().default(720),
+
+  // Google Business Profile API — conservative app-level quotas (QPM).
+  // Keep well below Google's documented defaults (e.g. Account Mgmt ~300 QPM).
+  GOOGLE_ACCOUNT_API_QPM: z.coerce.number().int().positive().default(60),
+  GOOGLE_BUSINESS_API_QPM: z.coerce.number().int().positive().default(120),
+  GOOGLE_REVIEW_API_QPM: z.coerce.number().int().positive().default(60),
+  GOOGLE_PERFORMANCE_API_QPM: z.coerce.number().int().positive().default(30),
+  GOOGLE_MAX_CONCURRENT_REQUESTS: z.coerce.number().int().positive().default(4),
+  GOOGLE_RETRY_LIMIT: z.coerce.number().int().min(0).max(10).default(5),
+  GOOGLE_BACKOFF_BASE_MS: z.coerce.number().int().positive().default(2000),
+  GOOGLE_BACKOFF_MAX_MS: z.coerce.number().int().positive().default(300_000),
+  // How many sync jobs the worker claims per cron tick.
+  GOOGLE_SYNC_WORKER_BATCH: z.coerce.number().int().positive().default(5),
+  // Retention for Google observability tables, pruned on the auto-sync tick.
+  // GoogleApiRequestLog gets a row per HTTP attempt and is only ever queried
+  // for the last hour, so it needs a short window; SyncRun is the visible run
+  // history, so it keeps longer.
+  GOOGLE_REQUEST_LOG_RETENTION_DAYS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(14),
+  GOOGLE_SYNC_RUN_RETENTION_DAYS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(90),
+  // Sync lock TTL (seconds) — expired locks are stealable.
+  GOOGLE_SYNC_LOCK_TTL_SEC: z.coerce.number().int().positive().default(300),
 
   // Email (SMTP)
   EMAIL_HOST: z.string().min(1),
@@ -125,6 +174,29 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .default("sudo /usr/local/bin/greviewpilot-nginx-reload"),
+  // Also issue a certificate + nginx vhost for the www counterpart of APP_URL's
+  // hostname, redirecting it to the primary. On by default: visitors type both
+  // forms, and a domain that only serves one of them looks broken. Set to
+  // "false" if APP_URL is already the www form, or if something else (a CDN)
+  // owns the www hostname.
+  PLATFORM_INCLUDE_WWW: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => v !== "false"),
+  // Extra hostnames, comma-separated, to include on the platform's own
+  // certificate and nginx config — e.g. a legacy domain being retired. Rare;
+  // most deployments need only APP_URL and its www counterpart.
+  PLATFORM_ALT_HOSTNAMES: z
+    .string()
+    .optional()
+    .default("")
+    .transform((v) =>
+      v
+        .split(",")
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean),
+    ),
   // Address nginx proxies tenant traffic to: where this app actually listens.
   //
   // Must be configured separately from APP_URL. They are the same thing in
@@ -159,10 +231,92 @@ const EnvSchema = z.object({
   MEDIA_MAX_TENANT_GB: z.coerce.number().int().positive().default(10),
 });
 
+/**
+ * Whether a redirect URI is one Google will accept.
+ *
+ * Google requires https for OAuth redirect URIs, with an explicit exemption
+ * for loopback addresses so local development works.
+ */
+function isSecureRedirectUri(value: string): boolean {
+  try {
+    const u = new URL(value);
+    if (u.protocol === "https:") return true;
+    return (
+      u.protocol === "http:" &&
+      (u.hostname === "localhost" ||
+        u.hostname === "127.0.0.1" ||
+        u.hostname === "[::1]" ||
+        u.hostname === "::1")
+    );
+  } catch {
+    return false;
+  }
+}
+
+const RefinedEnvSchema = EnvSchema.superRefine((cfg, ctx) => {
+  // Google OAuth is all-or-nothing. A deploy with an ID but no secret used to
+  // pass validation and then fail at the token exchange, which reads as a
+  // Google outage rather than a missing variable.
+  const hasId = Boolean(cfg.GOOGLE_CLIENT_ID);
+  const hasSecret = Boolean(cfg.GOOGLE_CLIENT_SECRET);
+  if (hasId !== hasSecret) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [hasId ? "GOOGLE_CLIENT_SECRET" : "GOOGLE_CLIENT_ID"],
+      message:
+        "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set together — " +
+        "set both to enable the Google Business connection, or neither to disable it",
+    });
+  }
+
+  // In production the redirect URI must be explicit. The APP_URL fallback is
+  // fine locally, but silently deriving it in production produces a value that
+  // may not be registered on the OAuth client, and the only symptom is a
+  // redirect_uri_mismatch on Google's own error page.
+  if (cfg.NODE_ENV === "production" && hasId) {
+    if (!cfg.GOOGLE_REDIRECT_URI) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["GOOGLE_REDIRECT_URI"],
+        message:
+          "GOOGLE_REDIRECT_URI must be set explicitly in production and must match the " +
+          "Authorized redirect URI registered on the OAuth client verbatim",
+      });
+    } else if (!isSecureRedirectUri(cfg.GOOGLE_REDIRECT_URI)) {
+      // Google accepts plain http only for loopback addresses. Note that
+      // `next build` forces NODE_ENV=production, so a local production build
+      // with a localhost redirect URI must not trip this.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["GOOGLE_REDIRECT_URI"],
+        message:
+          "GOOGLE_REDIRECT_URI must use https:// — Google rejects plain http redirect " +
+          "URIs for anything other than localhost/127.0.0.1",
+      });
+    }
+  }
+
+  // Encrypted-at-rest Google tokens become unreadable if the key changes, so
+  // production must pin one rather than inherit the AUTH_SECRET-derived
+  // fallback, which moves whenever AUTH_SECRET is rotated.
+  if (cfg.NODE_ENV === "production" && hasId && !cfg.ENCRYPTION_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["ENCRYPTION_KEY"],
+      message:
+        "ENCRYPTION_KEY must be set in production when Google OAuth is enabled — " +
+        "without it the token encryption key is derived from AUTH_SECRET, and rotating " +
+        "AUTH_SECRET would make every stored Google token permanently unreadable",
+    });
+  }
+});
+
 export type Env = z.infer<typeof EnvSchema>;
 
 function parseEnv(): Env {
-  const parsed = EnvSchema.safeParse(process.env);
+  // RefinedEnvSchema adds the cross-field checks. `Env` stays derived from the
+  // base object schema so `EnvSchema.shape` remains usable elsewhere.
+  const parsed = RefinedEnvSchema.safeParse(process.env);
   if (!parsed.success) {
     // Group errors by field for a readable message.
     const issues = parsed.error.issues

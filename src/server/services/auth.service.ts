@@ -16,7 +16,7 @@
  *   - Successful password changes revoke all OTHER sessions of the user.
  */
 
-import { AuditAction, UserRole, UserStatus, TenantStatus } from "@prisma/client";
+import { AuditAction, UserRole, UserStatus, TenantStatus, Prisma, BillingStatus, TenantPlan } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { userRepository } from "@/server/repositories/user.repository";
 import { tenantRepository } from "@/server/repositories/tenant.repository";
@@ -39,17 +39,38 @@ import { generateToken } from "@/server/utils/tokens";
 import {
   AppError,
   ConflictError,
+  ForbiddenError,
   NotFoundError,
   UnauthorizedError,
 } from "@/server/utils/errors";
-import type { SignupInput, LoginInput } from "@/server/validators/auth.schema";
+import type {
+  SignupInput,
+  LoginInput,
+  CompleteGoogleSignupInput,
+} from "@/server/validators/auth.schema";
 import { extractRequestContext } from "@/server/middleware/requestContext";
 import { logger } from "@/server/utils/logger";
+import { env } from "@/server/utils/env";
+import {
+  type ActivatablePlan,
+  isTrialExpired,
+  readTenantMeta,
+  trialEndsAtFrom,
+} from "@/server/utils/trial";
+
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1h
 const MAX_FAILED_LOGINS = 5;
 const LOCK_DURATION_MS = 15 * 60 * 1000;
+
+/** Tenant.metadata flag set when Google OAuth creates a provisional workspace. */
+export function isSignupIncomplete(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return (metadata as Record<string, unknown>).signupIncomplete === true;
+}
 
 export const authService = {
   // ============================================================
@@ -111,12 +132,19 @@ export const authService = {
 
     // 3) Atomic create: tenant + user (both ACTIVE, email pre-verified).
     const { user, tenant } = await prisma.$transaction(async (tx) => {
+      const now = new Date();
       const slug = await tenantService.generateUniqueSlug(input.businessName);
       const tenant = await tx.tenant.create({
         data: {
           name: input.businessName,
           slug,
-          trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+          plan: TenantPlan.TRIAL,
+          status: TenantStatus.TRIAL,
+          billingStatus: BillingStatus.TRIALING,
+          trialStartAt: now,
+          trialEndsAt: trialEndsAtFrom(now),
+          website: input.businessWebsite ?? null,
+          phone: input.businessPhone ?? null,
         },
       });
       const user = await tx.user.create({
@@ -156,6 +184,96 @@ export const authService = {
     });
 
     return { userId: user.id, email, tenantId: tenant.id };
+  },
+
+  // ============================================================
+  // GOOGLE SIGNUP COMPLETION
+  // ============================================================
+  /**
+   * Finishes a provisional Google signup: replaces the placeholder
+   * workspace name with the real business details and clears the
+   * `signupIncomplete` metadata flag. Email is already verified by
+   * Google, so no OTP is required.
+   */
+  async completeGoogleSignup(
+    userId: string,
+    tenantId: string,
+    input: CompleteGoogleSignupInput,
+    request?: Request | Headers | null,
+  ) {
+    const [user, tenant] = await Promise.all([
+      userRepository.findById(userId),
+      tenantRepository.findById(tenantId),
+    ]);
+    if (!user || user.tenantId !== tenantId) {
+      throw new NotFoundError("Account not found");
+    }
+    if (!tenant) {
+      throw new NotFoundError("Workspace not found");
+    }
+    if (!isSignupIncomplete(tenant.metadata)) {
+      // Idempotent — already finished; treat as success.
+      return { userId, tenantId, alreadyComplete: true as const };
+    }
+
+    const prevMeta =
+      tenant.metadata && typeof tenant.metadata === "object" && !Array.isArray(tenant.metadata)
+        ? { ...(tenant.metadata as Record<string, unknown>) }
+        : {};
+    delete prevMeta.signupIncomplete;
+    const nextMetadata: Prisma.InputJsonValue = {
+      ...prevMeta,
+      signupProvider: "google",
+      onboarding: {
+        category: input.category,
+        locations: input.locations,
+        achieve: input.achieve,
+        completedAt: new Date().toISOString(),
+      },
+    };
+
+    const slug = await tenantService.generateUniqueSlug(input.businessName, tenantId);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.tenant.update({
+        where: { id: tenantId },
+        data: {
+          name: input.businessName,
+          slug,
+          website: input.businessWebsite ?? null,
+          phone: input.businessPhone ?? null,
+          industry: input.category,
+          metadata: nextMetadata,
+        },
+      });
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          ...(input.firstName ? { firstName: input.firstName } : {}),
+          ...(input.lastName ? { lastName: input.lastName } : {}),
+          phone: input.businessPhone ?? user.phone,
+        },
+      });
+    });
+
+    const ctx = request ? extractRequestContext(request) : null;
+    await auditRepository.record({
+      action: AuditAction.SIGNUP,
+      userId,
+      tenantId,
+      ipAddress: ctx?.ipAddress,
+      userAgent: ctx?.userAgent,
+      browser: ctx?.browser,
+      device: ctx?.device,
+      metadata: { provider: "google", phase: "completed" },
+    });
+
+    void emailService.sendWelcomeEmail({
+      to: user.email,
+      firstName: input.firstName ?? user.firstName,
+    });
+
+    return { userId, tenantId, alreadyComplete: false as const };
   },
 
   // ============================================================
@@ -228,13 +346,65 @@ export const authService = {
    * Handles progressive lockout and constant-time behavior for
    * unknown emails.
    */
+  async ensureSuperAdminUser() {
+    if (!env.SUPER_ADMIN_USER || !env.SUPER_ADMIN_PASSWORD) return null;
+    const email = env.SUPER_ADMIN_USER.toLowerCase();
+    let user = await userRepository.findByEmail(email);
+    const passwordHash = await hashPassword(env.SUPER_ADMIN_PASSWORD);
+
+    if (!user) {
+      user = await prisma.$transaction(async (tx) => {
+        let tenant = await tx.tenant.findUnique({ where: { slug: "system-admin" } });
+        if (!tenant) {
+          tenant = await tx.tenant.create({
+            data: {
+              name: "System Admin Workspace",
+              slug: "system-admin",
+              plan: TenantPlan.ENTERPRISE,
+              status: TenantStatus.ACTIVE,
+              billingStatus: BillingStatus.ACTIVE,
+            },
+          });
+        }
+        return await tx.user.create({
+          data: {
+            tenantId: tenant.id,
+            firstName: "Super",
+            lastName: "Admin",
+            email,
+            passwordHash,
+            role: UserRole.SUPER_ADMIN,
+            status: UserStatus.ACTIVE,
+            emailVerified: new Date(),
+          },
+        });
+      });
+    } else {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash,
+          role: UserRole.SUPER_ADMIN,
+          status: UserStatus.ACTIVE,
+          emailVerified: user.emailVerified || new Date(),
+        },
+      });
+    }
+    return user;
+  },
+
   async verifyCredentials(input: LoginInput, request?: Request | Headers | null) {
     const email = input.email.toLowerCase();
-    const user = await userRepository.findByEmail(email);
+    let user = await userRepository.findByEmail(email);
+
+    if (!user && env.SUPER_ADMIN_USER && email === env.SUPER_ADMIN_USER.toLowerCase()) {
+      user = await this.ensureSuperAdminUser();
+    }
+
     const ctx = request ? extractRequestContext(request) : null;
 
-    // Constant-time even when the user doesn't exist.
-    if (!user || !user.passwordHash) {
+    // Unknown email — constant-time dummy verify to prevent user enumeration.
+    if (!user) {
       await verifyPassword(DUMMY_PASSWORD_HASH, input.password);
       await auditRepository.record({
         action: AuditAction.LOGIN_FAILED,
@@ -246,6 +416,29 @@ export const authService = {
       });
       throw new UnauthorizedError("INVALID_CREDENTIALS", "Invalid email or password");
     }
+
+
+    // Google-only account — no password set. We don't run the dummy hash here
+    // because the user's existence is already known (they typed their email),
+    // so timing-safety doesn't help. Surface a specific, actionable error.
+    if (!user.passwordHash) {
+      await auditRepository.record({
+        action: AuditAction.LOGIN_FAILED,
+        userId: user.id,
+        tenantId: user.tenantId,
+        ipAddress: ctx?.ipAddress,
+        userAgent: ctx?.userAgent,
+        browser: ctx?.browser,
+        device: ctx?.device,
+        metadata: { reason: "google_only_account" },
+      });
+      throw new AppError(
+        "GOOGLE_ACCOUNT",
+        "This account uses Google Sign-In. Please continue with Google.",
+        401,
+      );
+    }
+
 
     // Account lockout window.
     if (user.lockedUntil && user.lockedUntil > new Date()) {
@@ -286,7 +479,25 @@ export const authService = {
       throw new UnauthorizedError("ACCOUNT_BLOCKED", "This account has been blocked");
     }
     if (user.status === UserStatus.DELETED) {
-      throw new UnauthorizedError("ACCOUNT_INACTIVE", "Account no longer exists");
+      const deletedTenant = await tenantRepository.findById(user.tenantId);
+      const meta = readTenantMeta(deletedTenant?.metadata);
+      throw new AppError(
+        "ACCOUNT_DELETED",
+        "This account was deleted. Would you like to retrieve it?",
+        403,
+        {
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          businessName: deletedTenant?.name ?? null,
+          plan: deletedTenant?.plan ?? null,
+          industry: deletedTenant?.industry ?? null,
+          website: deletedTenant?.website ?? null,
+          phone: deletedTenant?.phone ?? user.phone,
+          deletedAt: (meta.deletedAt as string | undefined) ?? null,
+          createdAt: user.createdAt.toISOString(),
+        },
+      );
     }
     if (!user.emailVerified) {
       throw new UnauthorizedError(
@@ -297,8 +508,43 @@ export const authService = {
 
     // Tenant status gate.
     const tenant = await tenantRepository.findById(user.tenantId);
-    if (!tenant || tenant.status === TenantStatus.SUSPENDED || tenant.status === TenantStatus.DELETED) {
+    if (!tenant || tenant.status === TenantStatus.SUSPENDED) {
       throw new UnauthorizedError("TENANT_SUSPENDED", "Workspace is not available");
+    }
+    if (tenant.status === TenantStatus.DELETED) {
+      const meta = readTenantMeta(tenant.metadata);
+      throw new AppError(
+        "ACCOUNT_DELETED",
+        "This account was deleted. Would you like to retrieve it?",
+        403,
+        {
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          businessName: tenant.name,
+          plan: tenant.plan,
+          industry: tenant.industry,
+          website: tenant.website,
+          phone: tenant.phone ?? user.phone,
+          deletedAt: (meta.deletedAt as string | undefined) ?? null,
+          createdAt: user.createdAt.toISOString(),
+        },
+      );
+    }
+
+    if (isTrialExpired(tenant)) {
+      throw new AppError(
+        "TRIAL_ENDED",
+        "Your free trial has ended. Subscribe to a plan to continue.",
+        403,
+        {
+          email: user.email,
+          firstName: user.firstName,
+          businessName: tenant.name,
+          trialEndsAt: tenant.trialEndsAt?.toISOString() ?? null,
+          plan: tenant.plan,
+        },
+      );
     }
 
     // Success.
@@ -448,5 +694,270 @@ export const authService = {
       ipAddress: ctx?.ipAddress ?? null,
     });
     return { userId: user.id };
+  },
+
+  // ============================================================
+  // PLAN ACTIVATION (post-trial)
+  // ============================================================
+  /**
+   * Verifies credentials, activates a subscription plan on an expired
+   * trial workspace, then returns the user so the caller can sign them in.
+   */
+  async activatePlan(
+    input: LoginInput & { plan: ActivatablePlan },
+    request?: Request | Headers | null,
+  ) {
+    const email = input.email.toLowerCase();
+    const user = await userRepository.findByEmail(email);
+    if (!user?.passwordHash) {
+      await verifyPassword(DUMMY_PASSWORD_HASH, input.password);
+      throw new UnauthorizedError("INVALID_CREDENTIALS", "Invalid email or password");
+    }
+    const ok = await verifyPassword(user.passwordHash, input.password);
+    if (!ok) {
+      throw new UnauthorizedError("INVALID_CREDENTIALS", "Invalid email or password");
+    }
+    if (user.status !== UserStatus.ACTIVE) {
+      throw new UnauthorizedError("ACCOUNT_INACTIVE", "Account is not active");
+    }
+
+    const tenant = await tenantRepository.findById(user.tenantId);
+    if (!tenant) throw new NotFoundError("Workspace not found");
+
+    const planEnum =
+      input.plan === "GROWTH"
+        ? TenantPlan.GROWTH
+        : input.plan === "SCALE"
+          ? TenantPlan.SCALE
+          : TenantPlan.STARTER;
+
+    await tenantRepository.update(tenant.id, {
+      plan: planEnum,
+      status: TenantStatus.ACTIVE,
+      billingStatus: BillingStatus.ACTIVE,
+      reactivatedAt: new Date(),
+    });
+
+    const ctx = request ? extractRequestContext(request) : null;
+    await auditRepository.record({
+      action: AuditAction.WORKSPACE_UPDATED,
+      userId: user.id,
+      tenantId: tenant.id,
+      ipAddress: ctx?.ipAddress,
+      userAgent: ctx?.userAgent,
+      metadata: { plan: input.plan, reason: "trial_ended_subscribe" },
+    });
+
+    await userRepository.recordSuccessfulLogin(user.id);
+    return user;
+  },
+
+  /**
+   * Activates a plan for an already-authenticated session (dashboard
+   * subscribe modal when the trial expires mid-session).
+   */
+  async activatePlanForSession(
+    userId: string,
+    tenantId: string,
+    plan: ActivatablePlan,
+    request?: Request | Headers | null,
+  ) {
+    const [user, tenant] = await Promise.all([
+      userRepository.findById(userId),
+      tenantRepository.findById(tenantId),
+    ]);
+    if (!user || user.tenantId !== tenantId) throw new NotFoundError("Account not found");
+    if (!tenant) throw new NotFoundError("Workspace not found");
+
+    const planEnum =
+      plan === "GROWTH"
+        ? TenantPlan.GROWTH
+        : plan === "SCALE"
+          ? TenantPlan.SCALE
+          : TenantPlan.STARTER;
+
+    await tenantRepository.update(tenant.id, {
+      plan: planEnum,
+      status: TenantStatus.ACTIVE,
+      billingStatus: BillingStatus.ACTIVE,
+      reactivatedAt: new Date(),
+    });
+
+    const ctx = request ? extractRequestContext(request) : null;
+    await auditRepository.record({
+      action: AuditAction.WORKSPACE_UPDATED,
+      userId,
+      tenantId,
+      ipAddress: ctx?.ipAddress,
+      userAgent: ctx?.userAgent,
+      metadata: { plan, reason: "subscribe_from_dashboard" },
+    });
+
+    return { plan: planEnum };
+  },
+
+  // ============================================================
+  // ACCOUNT DELETE / RESTORE
+  // ============================================================
+  async deleteAccount(
+    userId: string,
+    tenantId: string,
+    confirmation: string,
+    request?: Request | Headers | null,
+  ) {
+    const [user, tenant] = await Promise.all([
+      userRepository.findById(userId),
+      tenantRepository.findById(tenantId),
+    ]);
+    if (!user || user.tenantId !== tenantId) throw new NotFoundError("Account not found");
+    if (user.role !== UserRole.TENANT_OWNER) {
+      throw new ForbiddenError("Only the workspace owner can delete this account");
+    }
+    if (!tenant) throw new NotFoundError("Workspace not found");
+    if (confirmation.trim().toUpperCase() !== "DELETE") {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        'Type DELETE to permanently remove this account',
+        400,
+      );
+    }
+
+    const meta = readTenantMeta(tenant.metadata);
+    const nextMeta: Prisma.InputJsonValue = {
+      ...meta,
+      deletedAt: new Date().toISOString(),
+      deletedByUserId: userId,
+      previousStatus: tenant.status,
+      previousPlan: tenant.plan,
+      previousBillingStatus: tenant.billingStatus,
+    };
+
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: { status: UserStatus.DELETED },
+      });
+      // Soft-delete every member of the workspace so team logins also fail cleanly.
+      await tx.user.updateMany({
+        where: { tenantId, status: { not: UserStatus.DELETED } },
+        data: { status: UserStatus.DELETED },
+      });
+      await tx.tenant.update({
+        where: { id: tenantId },
+        data: {
+          status: TenantStatus.DELETED,
+          metadata: nextMeta,
+        },
+      });
+    });
+
+    await sessionService.revokeAllForUser(userId, "ACCOUNT_DELETED");
+
+    const ctx = request ? extractRequestContext(request) : null;
+    await auditRepository.record({
+      action: AuditAction.USER_REMOVED,
+      userId,
+      tenantId,
+      ipAddress: ctx?.ipAddress,
+      userAgent: ctx?.userAgent,
+      metadata: { reason: "owner_self_delete" },
+    });
+
+    return { deleted: true as const };
+  },
+
+  async restoreAccount(input: LoginInput, request?: Request | Headers | null) {
+    const email = input.email.toLowerCase();
+    const user = await userRepository.findByEmail(email);
+    if (!user?.passwordHash) {
+      await verifyPassword(DUMMY_PASSWORD_HASH, input.password);
+      throw new UnauthorizedError("INVALID_CREDENTIALS", "Invalid email or password");
+    }
+    const ok = await verifyPassword(user.passwordHash, input.password);
+    if (!ok) {
+      throw new UnauthorizedError("INVALID_CREDENTIALS", "Invalid email or password");
+    }
+    if (user.status !== UserStatus.DELETED) {
+      throw new ConflictError("CONFLICT", "This account is not deleted");
+    }
+
+    const tenant = await tenantRepository.findById(user.tenantId);
+    if (!tenant) throw new NotFoundError("Workspace not found");
+
+    const meta = readTenantMeta(tenant.metadata);
+    const prevStatus =
+      (meta.previousStatus as TenantStatus | undefined) ?? TenantStatus.TRIAL;
+    const prevPlan = (meta.previousPlan as TenantPlan | undefined) ?? TenantPlan.TRIAL;
+    const prevBilling =
+      (meta.previousBillingStatus as BillingStatus | undefined) ?? BillingStatus.TRIALING;
+
+    delete meta.deletedAt;
+    delete meta.deletedByUserId;
+    delete meta.previousStatus;
+    delete meta.previousPlan;
+    delete meta.previousBillingStatus;
+
+    // If they restore after the trial window and were still on TRIAL, force
+    // plan selection on next login via isTrialExpired.
+    const restoreStatus =
+      prevStatus === TenantStatus.DELETED ? TenantStatus.TRIAL : prevStatus;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.user.updateMany({
+        where: { tenantId: tenant.id },
+        data: { status: UserStatus.ACTIVE },
+      });
+      await tx.tenant.update({
+        where: { id: tenant.id },
+        data: {
+          status: restoreStatus,
+          plan: prevPlan,
+          billingStatus: prevBilling,
+          reactivatedAt: new Date(),
+          metadata: meta as Prisma.InputJsonValue,
+        },
+      });
+    });
+
+    const ctx = request ? extractRequestContext(request) : null;
+    await auditRepository.record({
+      action: AuditAction.WORKSPACE_REACTIVATED,
+      userId: user.id,
+      tenantId: tenant.id,
+      ipAddress: ctx?.ipAddress,
+      userAgent: ctx?.userAgent,
+      metadata: { reason: "owner_restore" },
+    });
+
+    const refreshed = await tenantRepository.findById(tenant.id);
+    if (refreshed && isTrialExpired(refreshed)) {
+      throw new AppError(
+        "TRIAL_ENDED",
+        "Your account was restored, but your free trial has ended. Subscribe to continue.",
+        403,
+        {
+          email: user.email,
+          firstName: user.firstName,
+          businessName: refreshed.name,
+          trialEndsAt: refreshed.trialEndsAt?.toISOString() ?? null,
+          plan: refreshed.plan,
+          restored: true,
+        },
+      );
+    }
+
+    await userRepository.recordSuccessfulLogin(user.id);
+    return user;
+  },
+
+  async dismissWelcome(tenantId: string) {
+    const tenant = await tenantRepository.findById(tenantId);
+    if (!tenant) throw new NotFoundError("Workspace not found");
+    const meta = readTenantMeta(tenant.metadata);
+    meta.welcomeDismissed = true;
+    await tenantRepository.update(tenantId, {
+      metadata: meta as Prisma.InputJsonValue,
+    });
+    return { dismissed: true as const };
   },
 };

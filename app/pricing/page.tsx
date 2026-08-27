@@ -8,8 +8,11 @@ import { SiteFooter } from "@/components/site/footer";
 
 const tiers = [
   { name: "Starter", monthly: 0, yearly: 0, tag: "For solo operators", description: "Everything you need to keep one location's reputation clean.", features: ["1 Google Business location", "50 AI replies / month", "Basic sentiment analytics", "QR review campaign (1)", "Weekly reputation digest", "Email support"], cta: "Start free", popular: false },
-  { name: "Growth", monthly: 4999, yearly: 3999, tag: "For growing brands", description: "The plan most teams choose. AI that runs your reviews on autopilot.", features: ["Up to 5 locations", "Unlimited AI replies", "Advanced sentiment & topic analysis", "Unlimited QR campaigns", "Local SEO rank tracking", "Custom AI voice profile", "Slack & WhatsApp alerts", "Priority chat support"], cta: "Start 14-day trial", popular: true },
-  { name: "Enterprise", monthly: null, yearly: null, tag: "For multi-location", description: "Governance, security, and success motion for 20+ locations.", features: ["Unlimited locations & seats", "Custom AI voice & content guardrails", "SSO / SAML & audit logs", "Role-based access controls", "Dedicated success manager", "99.95% uptime SLA", "Regional data residency", "White-glove onboarding"], cta: "Talk to sales", popular: false },
+  { name: "Growth", monthly: 4999, yearly: 3999, tag: "For growing brands", description: "The plan most teams choose. AI that runs your reviews on autopilot.", features: ["Up to 5 locations", "Unlimited AI replies", "Advanced sentiment & topic analysis", "Unlimited QR campaigns", "Local SEO rank tracking", "Custom AI voice profile", "Slack & WhatsApp alerts", "Priority chat support"], cta: "Start free trial", popular: true },
+  // NOTE: this tier is named "Scale" in the in-app plan catalog
+  // (src/lib/plans.ts). Left as "Enterprise" here because choosing the
+  // customer-facing name is a business decision, not a claim correction.
+  { name: "Enterprise", monthly: null, yearly: null, tag: "For multi-location", description: "Governance, security, and success motion for 20+ locations.", features: ["Unlimited locations & seats", "Custom AI voice & content guardrails", "SSO-ready workspace & audit logs", "Role-based access controls", "Dedicated success manager", "Custom domains with managed SSL", "Onboarding support"], cta: "Talk to sales", popular: false },
 ];
 
 const compareRows = [
@@ -22,24 +25,30 @@ const compareRows = [
   { label: "Slack / WhatsApp alerts", starter: false, growth: true, enterprise: true },
   { label: "SSO / SAML", starter: false, growth: false, enterprise: true },
   { label: "Audit logs", starter: false, growth: false, enterprise: true },
-  { label: "Data residency", starter: false, growth: false, enterprise: true },
-  { label: "Uptime SLA", starter: false, growth: "99.9%", enterprise: "99.95%" },
-  { label: "Support", starter: "Email", growth: "Priority chat", enterprise: "Dedicated CSM" },
+  // Removed: "Data residency" and "Uptime SLA (99.9% / 99.95%)" rows. Neither
+  // is implemented — there is a single database host and no formal SLA.
+  { label: "Custom domain & SSL", starter: false, growth: true, enterprise: true },
+  { label: "Support", starter: "Email", growth: "Priority chat", enterprise: "Dedicated success manager" },
 ];
 
 const faqs = [
-  { q: "Do I need a credit card to start?", a: "No. The Starter plan is free forever and requires only a Google account. You'll only be asked for payment when you upgrade to Growth or above." },
-  { q: "Can I change plans or cancel anytime?", a: "Yes. Upgrade, downgrade, or cancel from your dashboard in one click. If you cancel mid-cycle we credit the unused portion to your next invoice." },
+  { q: "Do I need a credit card to start?", a: "No. The Starter plan is free and requires only a Google account. You'll only be asked for payment when you upgrade to Growth or above." },
+  { q: "Can I change plans or cancel anytime?", a: "Yes. Upgrade, downgrade, or cancel from your dashboard. Cancellation stops the next renewal and you keep access until the end of the period you've already paid for — see our Refund & Cancellation Policy for the full terms." },
   { q: "How does AI reply pricing work?", a: "Starter includes 50 AI replies per month. Growth and Enterprise are unlimited — no per-reply metering, no throttling." },
-  { q: "Do you offer discounts for agencies?", a: "Yes — agencies managing 10+ client locations get bulk pricing and a partner dashboard. Reach out via the Contact page." },
-  { q: "Is my customer data safe?", a: "We're SOC 2 Type II certified, DPDP Act 2023 compliant, ISO 27001 certified, and never train public models on your data. All customer data is stored in India (Mumbai & Hyderabad regions)." },
-  { q: "What happens after the 14-day trial?", a: "Your account moves to Starter automatically. Nothing is deleted, nothing is charged — you can stay free or upgrade whenever you're ready." },
+  { q: "Do you offer discounts for agencies?", a: "Yes — agencies managing multiple client locations can get bulk pricing. Reach out via the Contact page." },
+  { q: "Is my customer data safe?", a: "Your Google credentials are encrypted at rest, every workspace is isolated, access is role-based, and privileged actions are recorded in an audit log. AI features process content using third-party AI services — our Privacy Policy sets out exactly what is sent, what we store, and how to delete it." },
+  { q: "What happens after the free trial?", a: "Your account moves to Starter automatically. Nothing is deleted, nothing is charged — you can stay free or upgrade whenever you're ready." },
 ];
 
+// The money-back window here previously read "30-day" while the published
+// Refund & Cancellation Policy states 7 days. Rather than pick a number,
+// this now points at the policy — the policy is the authoritative statement
+// and the two must not disagree. Confirm the intended window and set it in
+// both places.
 const guarantees = [
-  { icon: ShieldCheck, title: "30-day money back", body: "Not seeing lift? We refund the full amount, no questions asked." },
-  { icon: Zap, title: "Setup in 8 minutes", body: "Connect Google Business, pick your voice, and you're live." },
-  { icon: HelpCircle, title: "Real humans, real fast", body: "Median first response: 12 minutes on chat, 2 hours on email." },
+  { icon: ShieldCheck, title: "Money-back window", body: "Not the right fit? See our Refund & Cancellation Policy for how refunds work." },
+  { icon: Zap, title: "Quick setup", body: "Connect Google Business, pick your voice, and you're live." },
+  { icon: HelpCircle, title: "Real humans", body: "Email and chat support from the team that builds the product." },
 ];
 
 function Cell({ v }: { v: string | boolean }) {
@@ -80,7 +89,7 @@ export default function PricingPage() {
         {/* Tier cards */}
         <section className="mx-auto mt-16 grid max-w-6xl gap-6 px-6 md:grid-cols-3">
           {tiers.map((t) => (
-            <div key={t.name} className={"relative flex flex-col rounded-2xl border p-8 shadow-soft transition hover:-translate-y-1 " + (t.popular ? "border-primary/30 bg-card ring-gradient shadow-elevated" : "border-border bg-card")}>
+            <div key={t.name} className={"relative flex flex-col rounded-2xl border p-8 shadow-soft transition hover:-translate-y-1 " + (t.popular ? "border-primary/30 bg-card shadow-elevated" : "border-border bg-card")}>
               {t.popular && <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-[image:var(--gradient-brand)] px-3 py-1 text-[11px] font-semibold text-white shadow-glow">Most popular</span>}
               <div className="text-sm font-medium text-muted-foreground">{t.tag}</div>
               <div className="mt-1 text-2xl font-bold">{t.name}</div>
@@ -179,8 +188,11 @@ export default function PricingPage() {
         {/* CTA */}
         <section className="mx-auto mt-24 max-w-5xl px-6">
           <div className="ring-gradient rounded-3xl bg-card p-10 text-center shadow-elevated">
-            <h2 className="text-3xl font-bold tracking-tight md:text-4xl">Try GReviewPilot free for 14 days.</h2>
-            <p className="mx-auto mt-3 max-w-xl text-muted-foreground">No credit card. Full Growth features. Cancel anytime — most teams never do.</p>
+            {/* Trial length comes from TRIAL_DAYS in src/lib/plans.ts, which is 7.
+                The previous copy said 14 days, contradicting both the code and the
+                navbar's "7 Day Free Trial". */}
+            <h2 className="text-3xl font-bold tracking-tight md:text-4xl">Try GReviewPilot free for 7 days.</h2>
+            <p className="mx-auto mt-3 max-w-xl text-muted-foreground">No credit card. Full Growth features. Cancel anytime.</p>
             <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link href="/auth?mode=signup" className="rounded-lg bg-foreground px-5 py-2.5 text-sm font-semibold text-background transition hover:-translate-y-0.5">Start free trial</Link>
               <Link href="/contact" className="rounded-lg border border-border bg-card px-5 py-2.5 text-sm font-medium text-foreground transition hover:bg-muted">Talk to sales</Link>

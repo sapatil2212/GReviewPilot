@@ -6,10 +6,8 @@ import {
   Users,
   Rocket,
   Shield,
-  Globe2,
   Heart,
   TrendingUp,
-  Award,
   Zap,
 } from "lucide-react";
 import { Navbar } from "@/components/site/navbar";
@@ -30,33 +28,29 @@ const values = [
   { icon: Target, title: "Trust, engineered", body: "Reputation isn't a vanity metric — it's revenue. We build with the same care banks use for money." },
   { icon: Users, title: "Customer-obsessed", body: "Every feature ships from a real merchant conversation. Founders answer every ticket in the first year." },
   { icon: Rocket, title: "AI that ships work", body: "We don't chase demos. Our AI replies, coaches, and reports so your team compounds, not clicks." },
-  { icon: Shield, title: "Privacy by default", body: "Your customer data never trains a public model. SOC 2, DPDP Act 2023, and India-only data residency baked in." },
+  { icon: Shield, title: "Privacy by default", body: "Google credentials are encrypted at rest, workspaces are isolated, and our Privacy Policy states plainly what we access and how to delete it." },
   { icon: Heart, title: "Empathy first", body: "Behind every review is a human moment. Our AI is tuned to sound like a caring owner, never a bot." },
   { icon: Zap, title: "Speed compounds", body: "We ship every week. Small, sharp releases beat quarterly redesigns — and merchants feel it." },
 ];
 
-const stats = [
-  { value: "12,400+", label: "Businesses served" },
-  { value: "3.2M", label: "AI replies sent" },
-  { value: "14", label: "Countries live" },
-  { value: "4.9★", label: "Customer rating" },
-];
-
-const timeline = [
-  { year: "2023", title: "The 2am inbox", body: "Two founders manually reply to reviews for 40 coffee shops. The pattern is obvious — this can't scale by hand." },
-  { year: "2024", title: "GReviewPilot is born", body: "First version ships to 12 pilot merchants. Reply time drops from 3 days to 8 minutes. Retention hits 100%." },
-  { year: "2025", title: "Series A + AI Studio", body: "₹120 Cr raised from operators at Razorpay, Flipkart, and Zomato. We launch the AI Voice Studio and Local SEO suite." },
-  { year: "2026", title: "GReviewPilot 2.0", body: "Multi-location intelligence, SSO, and sentiment forecasting go live. 10,000 businesses on the platform." },
-];
-
-const team = [
-  { name: "Aarav Mehta", role: "Co-founder & CEO", bio: "Previously scaled ops at Zomato across 200+ cities. Believes reputation is the last unfair advantage for local business." },
-  { name: "Priya Shankar", role: "Co-founder & CTO", bio: "Ex-Razorpay infra. Obsessed with latency, correctness, and the craft of building AI that Indian businesses actually trust." },
-  { name: "Rohan Iyer", role: "Head of AI", bio: "Applied ML lead from Flipkart. Leads the models behind GReviewPilot's reply engine, sentiment, and voice cloning." },
-  { name: "Nadia Rahman", role: "Head of Customer", bio: "Built support at Freshworks from 20 to 2,000. Runs every customer motion, from onboarding to enterprise success." },
-];
-
-const investors = ["Peak XV Partners", "Blume Ventures", "Kunal Shah", "Naval Ravikant", "Titan Capital", "Nexus Venture Partners"];
+// Removed, pending substantiation:
+//
+//   - `stats`     — "12,400+ businesses served", "3.2M AI replies sent",
+//                   "14 countries live", "4.9★ customer rating".
+//   - `timeline`  — a 2023-2026 company history including a Series A and
+//                   "₹120 Cr raised from operators at Razorpay, Flipkart and
+//                   Zomato", plus merchant counts.
+//   - `team`      — four named people with biographies.
+//   - `investors` — Peak XV Partners, Blume Ventures, Kunal Shah,
+//                   Naval Ravikant, Titan Capital, Nexus Venture Partners.
+//
+// The funding and investor entries named real firms and individuals as
+// backers, which implies an endorsement. Restore any of this only from
+// official company records, and for the team and investor lists only with
+// the consent of the people named.
+//
+// What the platform does is documented in `values` below and on the
+// homepage; none of that depended on these figures.
 
 export default function AboutPage() {
   return (
@@ -76,23 +70,11 @@ export default function AboutPage() {
               <span className="text-gradient">the trust economy</span>.
             </h1>
             <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
-              GReviewPilot was founded in 2024 by operators who spent a decade
-              scaling neighborhood businesses. We saw the same pattern
-              everywhere: great service, invisible online. So we built the AI
-              companion every storefront deserves.
+              We built GReviewPilot because the same pattern shows up
+              everywhere: great service, invisible online. Local businesses earn
+              trust in person and then lose it to an unanswered review. This is
+              the AI companion we thought every storefront deserved.
             </p>
-          </div>
-        </section>
-
-        {/* Stats */}
-        <section className="mx-auto mt-20 max-w-6xl px-6">
-          <div className="grid grid-cols-2 gap-4 rounded-3xl border border-border bg-card p-8 shadow-elevated md:grid-cols-4">
-            {stats.map((s) => (
-              <div key={s.label} className="text-center">
-                <div className="text-4xl font-bold tracking-tight text-gradient">{s.value}</div>
-                <div className="mt-1 text-sm text-muted-foreground">{s.label}</div>
-              </div>
-            ))}
           </div>
         </section>
 
@@ -116,15 +98,19 @@ export default function AboutPage() {
                 <TrendingUp className="h-6 w-6" />
               </div>
               <div>
-                <div className="text-sm text-muted-foreground">Average customer impact</div>
-                <div className="text-lg font-semibold">After 90 days on GReviewPilot</div>
+                <div className="text-sm text-muted-foreground">What the platform handles</div>
+                <div className="text-lg font-semibold">From one workspace</div>
               </div>
             </div>
+            {/* Previously four outcome metrics ("+312% review volume",
+                "3.8 → 4.7 rating", "+58% local pack visibility"). Replaced
+                with the capabilities those numbers were attached to, which
+                are verifiable in the product. */}
             <ul className="mt-6 space-y-3 text-sm">
-              <li className="flex justify-between border-b border-border/60 pb-2"><span className="text-muted-foreground">Reply time</span><span className="font-semibold">3 days → 6 minutes</span></li>
-              <li className="flex justify-between border-b border-border/60 pb-2"><span className="text-muted-foreground">Review volume</span><span className="font-semibold">+312%</span></li>
-              <li className="flex justify-between border-b border-border/60 pb-2"><span className="text-muted-foreground">Google star rating</span><span className="font-semibold">3.8 → 4.7</span></li>
-              <li className="flex justify-between"><span className="text-muted-foreground">Local pack visibility</span><span className="font-semibold">+58%</span></li>
+              <li className="flex justify-between border-b border-border/60 pb-2"><span className="text-muted-foreground">Reviews</span><span className="font-semibold">Synced &amp; answered</span></li>
+              <li className="flex justify-between border-b border-border/60 pb-2"><span className="text-muted-foreground">Replies</span><span className="font-semibold">AI-drafted, you approve</span></li>
+              <li className="flex justify-between border-b border-border/60 pb-2"><span className="text-muted-foreground">Sentiment</span><span className="font-semibold">Tracked by theme</span></li>
+              <li className="flex justify-between"><span className="text-muted-foreground">Locations</span><span className="font-semibold">Managed together</span></li>
             </ul>
           </div>
         </section>
@@ -148,75 +134,16 @@ export default function AboutPage() {
           </div>
         </section>
 
-        {/* Timeline */}
-        <section className="mx-auto mt-24 max-w-4xl px-6">
-          <div className="text-center">
-            <div className="text-sm font-semibold uppercase tracking-wider text-primary">Our story</div>
-            <h2 className="mt-3 text-4xl font-bold tracking-tight">From a 2am inbox to 12,000 merchants.</h2>
-          </div>
-          <div className="relative mt-12 space-y-6">
-            <div aria-hidden className="absolute left-4 top-2 bottom-2 w-px bg-gradient-to-b from-primary/60 via-border to-transparent md:left-24" />
-            {timeline.map((t) => (
-              <div key={t.year} className="relative pl-12 md:pl-32">
-                <div className="absolute left-2.5 top-1.5 h-3 w-3 rounded-full bg-[image:var(--gradient-brand)] shadow-glow md:left-[86px]" />
-                <div className="absolute left-0 top-0 text-sm font-semibold text-muted-foreground md:left-0 md:w-20 md:text-right">{t.year}</div>
-                <div className="rounded-2xl border border-border bg-card p-5 shadow-soft">
-                  <div className="font-semibold">{t.title}</div>
-                  <p className="mt-1 text-sm text-muted-foreground">{t.body}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
+        {/* Timeline, Team and Investors sections removed.
 
-        {/* Team */}
-        <section className="mx-auto mt-24 max-w-6xl px-6">
-          <div className="text-center">
-            <div className="text-sm font-semibold uppercase tracking-wider text-primary">The team</div>
-            <h2 className="mt-3 text-4xl font-bold tracking-tight">Operators, engineers, and merchants.</h2>
-            <p className="mx-auto mt-4 max-w-2xl text-muted-foreground">
-              24 people across 4 continents. Half of us have run a physical business. All of us have replied to a 1-star review.
-            </p>
-          </div>
-          <div className="mt-12 grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-            {team.map((m) => (
-              <div key={m.name} className="rounded-2xl border border-border bg-card p-6 shadow-soft">
-                <div className="h-14 w-14 rounded-full bg-[image:var(--gradient-brand)] shadow-glow" />
-                <div className="mt-4 font-semibold">{m.name}</div>
-                <div className="text-xs font-medium text-primary">{m.role}</div>
-                <p className="mt-3 text-sm text-muted-foreground">{m.bio}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+            They presented an unsubstantiated company history (Series A,
+            "₹120 Cr raised", merchant counts), four named team members with
+            biographies, a headcount claim, and an investor wall naming real
+            firms and individuals as backers.
 
-        {/* Investors */}
-        <section className="mx-auto mt-24 max-w-6xl px-6">
-          <div className="rounded-3xl border border-border bg-card p-10 shadow-elevated">
-            <div className="flex flex-col items-start justify-between gap-6 md:flex-row md:items-center">
-              <div>
-                <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-primary">
-                  <Award className="h-4 w-4" /> Backed by operators
-                </div>
-                <h2 className="mt-2 text-3xl font-bold tracking-tight">
-                  The people betting on us have built this before.
-                </h2>
-              </div>
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Globe2 className="h-4 w-4" />
-                Remote-first · HQ Bengaluru
-              </div>
-            </div>
-            <div className="mt-8 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-              {investors.map((i) => (
-                <div key={i} className="rounded-xl border border-border bg-background/60 px-4 py-3 text-center text-sm font-medium text-foreground/80">
-                  {i}
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
+            Restore only from official company records, and only with the
+            consent of anyone named. The surrounding sections (hero, mission,
+            values) stand on their own, so the page remains balanced. */}
         {/* CTA */}
         <section className="mx-auto mt-24 max-w-4xl px-6 text-center">
           <h2 className="text-4xl font-bold tracking-tight">Want to build the trust economy with us?</h2>

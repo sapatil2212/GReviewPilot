@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   MessageSquare,
   Sparkles,
@@ -10,11 +11,15 @@ import {
 import { Navbar } from "@/components/site/navbar";
 import { SiteFooter } from "@/components/site/footer";
 
+// Previously four unverifiable service metrics ("12 min median first
+// response", "4 hrs sales SLA", "99.95% uptime last quarter", "4.9 / 5
+// support CSAT"). Replaced with what we can state plainly about how support
+// works. Reinstate measured figures only once they are actually measured.
 const stats = [
-  { value: "12 min", label: "Median first response" },
-  { value: "4 hrs", label: "Sales SLA" },
-  { value: "99.95%", label: "Uptime last quarter" },
-  { value: "4.9 / 5", label: "Support CSAT" },
+  { value: "Email", label: "Support channel" },
+  { value: "Live chat", label: "During business hours" },
+  { value: "Mon–Fri", label: "Support days" },
+  { value: "IST", label: "Team timezone" },
 ];
 
 export default function ContactPage() {
@@ -109,7 +114,7 @@ export default function ContactPage() {
                 <div className="flex items-center justify-between md:col-span-2">
                   <p className="text-xs text-muted-foreground">
                     We&apos;ll never share your details. Read our{" "}
-                    <a className="underline underline-offset-2" href="#">privacy policy</a>.
+                    <Link className="underline underline-offset-2" href="/privacy">privacy policy</Link>.
                   </p>
                   <button type="submit" className="group relative inline-flex items-center justify-center gap-2 overflow-hidden rounded-lg bg-foreground px-5 py-2.5 text-sm font-semibold text-background transition hover:-translate-y-0.5">
                     Send message
@@ -125,15 +130,19 @@ export default function ContactPage() {
             <div className="ring-gradient rounded-3xl bg-card p-6 shadow-elevated">
               <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-primary"><MessageSquare className="h-4 w-4" /> Live chat</div>
               <h3 className="mt-2 text-xl font-bold tracking-tight">Prefer to talk right now?</h3>
-              <p className="mt-2 text-sm text-muted-foreground">Our team is online 24×5. Median first reply is under 12 minutes — no bots, no queues.</p>
+              <p className="mt-2 text-sm text-muted-foreground">Chat with the team during business hours — no bots, no queues.</p>
               <button className="mt-4 inline-flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-semibold text-background"><MessageSquare className="h-4 w-4" /> Open live chat</button>
             </div>
             <div className="rounded-3xl border border-border bg-card p-6 shadow-soft">
               <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-primary"><Phone className="h-4 w-4" /> Call sales</div>
+              {/* Previously listed Bengaluru, Mumbai, and toll-free numbers.
+                  Replaced with the single published contact number and address
+                  used in the footer and on the legal pages, so a reviewer
+                  checking our details finds one consistent answer. */}
               <div className="mt-3 space-y-2 text-sm">
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Bengaluru</span><span className="font-medium">+91 80 6971 0100</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Mumbai</span><span className="font-medium">+91 22 6971 0100</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Toll-free</span><span className="font-medium">1800 267 0100</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Phone</span><a href="tel:+919168081355" className="font-medium hover:underline">+91 9168 08 1355</a></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Email</span><a href="mailto:contact.greviewpilot@gmail.com" className="font-medium hover:underline">contact.greviewpilot@gmail.com</a></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Office</span><span className="font-medium">Pune, Maharashtra</span></div>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3">

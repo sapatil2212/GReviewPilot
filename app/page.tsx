@@ -3,7 +3,6 @@
 import {
   ArrowRight,
   Sparkles,
-  Star,
   QrCode,
   MessageSquare,
   BarChart3,
@@ -29,7 +28,6 @@ import {
   Reveal,
   CheckList,
 } from "@/components/site/hero-parts";
-import { useCountUp, useInView } from "@/lib/hooks";
 
 export default function Landing() {
   return (
@@ -42,7 +40,6 @@ export default function Landing() {
         <Features />
         <DashboardShowcase />
         <HowItWorks />
-        <Testimonials />
         <Pricing />
         <Enterprise />
         <FAQ />
@@ -114,10 +111,10 @@ function Hero() {
               <Check className="h-3.5 w-3.5 text-success" /> No credit card
             </span>
             <span className="flex items-center gap-1.5">
-              <Check className="h-3.5 w-3.5 text-success" /> Setup in 3 minutes
+              <Check className="h-3.5 w-3.5 text-success" /> Quick setup
             </span>
             <span className="flex items-center gap-1.5">
-              <Check className="h-3.5 w-3.5 text-success" /> SOC 2 aligned
+              <Check className="h-3.5 w-3.5 text-success" /> Revoke access anytime
             </span>
           </div>
         </Reveal>
@@ -134,15 +131,17 @@ function Hero() {
 
 /* --------------------------- LOGO CLOUD --------------------------- */
 
+// Industry categories, not customer names. The previous list read as a
+// customer logo wall, which implied client relationships we cannot evidence.
 const LOGOS = [
-  "Aroma Café",
-  "NorthPeak",
-  "Sundara Salon",
-  "Tokri",
-  "Vertex Dental",
-  "Kinara Clinics",
-  "Meridian Auto",
-  "Lumo Fitness",
+  "Cafés",
+  "Salons & Spas",
+  "Dental",
+  "Clinics",
+  "Automotive",
+  "Fitness",
+  "Retail",
+  "Hospitality",
 ];
 
 function LogoCloud() {
@@ -151,7 +150,7 @@ function LogoCloud() {
       <div className="mx-auto max-w-7xl px-6">
         <Reveal>
           <p className="text-center text-[12.5px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-            Trusted by 4,200+ local & multi-location businesses
+            Built for local & multi-location businesses
           </p>
         </Reveal>
         <div className="relative mt-8 overflow-hidden">
@@ -176,32 +175,40 @@ function LogoCloud() {
 
 /* --------------------------- METRICS ------------------------------ */
 
-function Metric({ target, suffix = "", label }: { target: number; suffix?: string; label: string }) {
-  const { ref, inView } = useInView<HTMLDivElement>(0.3);
-  const v = useCountUp(target, 1800, inView);
-  const isFloat = target % 1 !== 0;
-  return (
-    <div ref={ref} className="relative rounded-2xl border border-border bg-surface/50 p-6 backdrop-blur">
-      <div className="text-[36px] font-semibold tracking-tight sm:text-[44px]">
-        <span className="text-gradient">
-          {isFloat ? v.toFixed(1) : Math.round(v).toLocaleString()}
-        </span>
-        <span className="text-foreground">{suffix}</span>
-      </div>
-      <div className="mt-1 text-[13px] text-muted-foreground">{label}</div>
-    </div>
-  );
-}
-
+/**
+ * Capability strip.
+ *
+ * This section previously showed four count-up outcome metrics ("4.8 average
+ * rating lift", "5.2× more reviews with QR", "12s median AI reply time",
+ * "38% local rank improvement"). None could be substantiated, and there is no
+ * honest numeric substitute, so it now states what the platform does rather
+ * than what results it produces.
+ *
+ * The `Metric` count-up component that rendered those figures was removed
+ * with them — it had no other call site.
+ */
 function Metrics() {
+  const items = [
+    { label: "AI review replies", desc: "Drafted in your brand voice, approved by you." },
+    { label: "QR review campaigns", desc: "Branded flows that make leaving a review easy." },
+    { label: "Sentiment analytics", desc: "Themes and trends across every review." },
+    { label: "Local SEO insights", desc: "Track how your locations show up in search." },
+  ];
   return (
     <section id="product" className="relative py-20">
       <div className="mx-auto max-w-7xl px-6">
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <Metric target={4.8} label="Average rating lift" />
-          <Metric target={5.2} suffix="×" label="More reviews with QR" />
-          <Metric target={12} suffix="s" label="Median AI reply time" />
-          <Metric target={38} suffix="%" label="Local rank improvement" />
+          {items.map((it) => (
+            <div
+              key={it.label}
+              className="relative rounded-2xl border border-border bg-surface/50 p-6 backdrop-blur"
+            >
+              <div className="text-[17px] font-semibold tracking-tight text-gradient">
+                {it.label}
+              </div>
+              <div className="mt-1.5 text-[13px] text-muted-foreground">{it.desc}</div>
+            </div>
+          ))}
         </div>
       </div>
     </section>
@@ -257,7 +264,7 @@ function DashboardShowcase() {
     {
       icon: QrCode,
       title: "QR & SMS Campaigns",
-      desc: "Custom-branded QR flows that filter unhappy customers and 5× your review volume.",
+      desc: "Custom-branded QR flows that route unhappy customers to private feedback and make public reviews effortless.",
     },
     {
       icon: Globe,
@@ -361,77 +368,11 @@ function HowItWorks() {
 
 /* --------------------------- TESTIMONIALS ------------------------- */
 
-const TESTIMONIALS = [
-  {
-    name: "Riya Malhotra",
-    role: "Owner · Aroma Café (7 locations)",
-    quote:
-      "GReviewPilot replaced three tools and a part-time contractor. Our Google rating went from 4.2 to 4.8 in one quarter.",
-    stat: "+38% new customers",
-  },
-  {
-    name: "Arjun Verma",
-    role: "Marketing Lead · Vertex Dental",
-    quote:
-      "The AI replies genuinely sound like us. Patients notice. Reviews are up 4×, and negative ones now get resolved same-day.",
-    stat: "4× review volume",
-  },
-  {
-    name: "Nikhil Rao",
-    role: "Growth · Meridian Auto",
-    quote:
-      "The competitor tracking alone is worth the price. We know exactly where we're losing and how to win back rank.",
-    stat: "#1 in 12 grids",
-  },
-];
-
-function Testimonials() {
-  return (
-    <section id="customers" className="relative py-24">
-      <div className="mx-auto max-w-7xl px-6">
-        <Reveal>
-          <div className="flex flex-col items-center text-center">
-            <SectionEyebrow>Customer stories</SectionEyebrow>
-            <h2 className="mt-4 max-w-2xl text-[34px] font-semibold leading-[1.02] tracking-[-0.02em] sm:text-5xl">
-              Teams love shipping with <span className="text-gradient">GReviewPilot</span>.
-            </h2>
-          </div>
-        </Reveal>
-        <div className="relative mt-14 overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)]">
-          <div className="flex w-max gap-5 [animation:marquee_40s_linear_infinite] hover:[animation-play-state:paused]">
-            {[...TESTIMONIALS, ...TESTIMONIALS].map((t, i) => (
-              <div
-                key={`${t.name}-${i}`}
-                className="relative flex h-full w-[340px] shrink-0 flex-col rounded-2xl border border-border bg-background p-6 transition-all hover:-translate-y-1 hover:shadow-elevated sm:w-[380px]"
-              >
-                <div className="flex items-center gap-1 text-warning">
-                  {Array.from({ length: 5 }).map((_, j) => (
-                    <Star key={j} className="h-3.5 w-3.5 fill-current" />
-                  ))}
-                </div>
-                <p className="mt-4 text-[14.5px] leading-relaxed text-foreground/85">
-                  &ldquo;{t.quote}&rdquo;
-                </p>
-                <div className="mt-6 flex items-center gap-3 border-t border-border pt-4">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-primary via-accent to-secondary text-[12px] font-semibold text-white">
-                    {t.name.split(" ").map((n) => n[0]).join("")}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="truncate text-[13.5px] font-semibold">{t.name}</div>
-                    <div className="truncate text-[11.5px] text-muted-foreground">{t.role}</div>
-                  </div>
-                  <div className="ml-auto rounded-full border border-success/20 bg-success/10 px-2 py-1 text-[10.5px] font-semibold text-success">
-                    {t.stat}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
+// Removed: this section carried three attributed customer testimonials
+// (named individuals, named businesses, and outcome figures such as
+// "+38% new customers" and "4x review volume") that cannot be
+// substantiated. Restore it only with real, documented customer quotes
+// and written permission to publish them.
 
 /* --------------------------- PRICING ------------------------------ */
 
@@ -477,10 +418,10 @@ function Pricing() {
       features: [
         "Unlimited locations",
         "Custom AI fine-tuning",
-        "SSO, SAML, audit logs",
+        "SSO-ready workspace & audit logs",
         "White-label website builder",
-        "Dedicated CSM",
-        "99.99% uptime SLA",
+        "Dedicated success manager",
+        "Custom domains with managed SSL",
       ],
       cta: "Talk to sales",
       popular: false,
@@ -527,9 +468,6 @@ function Pricing() {
                     : "border-border bg-background hover:shadow-elevated")
                 }
               >
-                {t.popular && (
-                  <div className="pointer-events-none absolute inset-0 rounded-2xl ring-gradient" />
-                )}
                 {t.popular && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-[image:var(--gradient-brand)] px-3 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-white shadow-glow">
                     Most popular
@@ -609,14 +547,15 @@ function Enterprise() {
                 Built for trust from the ground up.
               </h3>
               <p className="mt-4 max-w-md text-[14.5px] text-background/70">
-                GReviewPilot is engineered for the world&apos;s most regulated brands.
-                Isolation by design, encrypted end-to-end, audited annually.
+                Workspaces are isolated by design, Google credentials are
+                encrypted at rest, and every privileged action is written to an
+                audit log.
               </p>
               <div className="mt-8 grid grid-cols-2 gap-4">
                 {[
-                  { icon: Lock, label: "SOC 2 · DPDP · ISO 27001" },
-                  { icon: ShieldCheck, label: "SSO / SAML / SCIM" },
-                  { icon: Cpu, label: "Private AI · zero retention" },
+                  { icon: Lock, label: "Encrypted credential storage" },
+                  { icon: ShieldCheck, label: "SSO-ready workspaces" },
+                  { icon: Cpu, label: "AI processing per our Privacy Policy" },
                   { icon: Users, label: "Role-based access & audit logs" },
                 ].map((it) => (
                   <div key={it.label} className="flex items-center gap-2 text-[13px] text-background/85">
@@ -633,11 +572,11 @@ function Enterprise() {
               <div className="mt-4">
                 <CheckListDark
                   items={[
-                    "Dedicated success engineer",
-                    "Custom AI fine-tuned to your brand",
-                    "Data residency in India (Mumbai & Hyderabad)",
-                    "99.99% uptime SLA + priority incident response",
-                    "White-glove migration & training",
+                    "Dedicated success manager",
+                    "Custom AI voice & content guardrails",
+                    "Workspace-level roles and audit logs",
+                    "Custom domains with managed SSL",
+                    "Onboarding & migration support",
                   ]}
                 />
               </div>
@@ -673,15 +612,15 @@ function CheckListDark({ items }: { items: string[] }) {
 const FAQS = [
   {
     q: "How does GReviewPilot's AI actually reply to reviews?",
-    a: "GReviewPilot learns your brand voice from your website, guidelines, and past replies. It drafts on-brand responses in seconds, flags sensitive reviews for human approval, and supports 20+ languages out of the box.",
+    a: "GReviewPilot learns your brand voice from your website, guidelines, and past replies. It drafts on-brand responses, flags sensitive reviews for human approval, and supports multiple languages. You approve a reply before it is published.",
   },
   {
     q: "Do I need to give up control of my Google Business Profile?",
-    a: "No. GReviewPilot connects via Google's official OAuth. You retain full ownership and can revoke access at any time. All changes are logged and reversible.",
+    a: "No. GReviewPilot connects using Google OAuth, which you authorise. You retain full ownership and can disconnect from your dashboard or revoke access from your Google Account at any time. Privileged actions are recorded in an audit log.",
   },
   {
     q: "How quickly can I get set up?",
-    a: "Most teams are live in under 3 minutes. Multi-location and enterprise migrations typically complete in under a week with a dedicated success engineer.",
+    a: "Connecting a Google Business Profile takes a few minutes. Larger multi-location rollouts get onboarding support on our top tier.",
   },
   {
     q: "Can GReviewPilot help with local SEO, not just reviews?",
@@ -689,7 +628,7 @@ const FAQS = [
   },
   {
     q: "Is my data secure?",
-    a: "GReviewPilot is SOC 2 aligned, DPDP Act 2023 compliant, ISO 27001 certified, and uses private AI with zero training retention on your data. All customer data is stored in India (Mumbai & Hyderabad regions).",
+    a: "Your Google credentials are encrypted at rest and never exposed through our API. Every workspace is isolated, access is role-based, and privileged actions are written to an audit log. AI features process content using third-party AI services — see our Privacy Policy for exactly what is sent, stored, and how to delete it.",
   },
 ];
 
@@ -753,22 +692,21 @@ function FinalCTA() {
               <span className="text-gradient">is one click away.</span>
             </h2>
             <p className="mt-5 max-w-xl text-[15.5px] text-muted-foreground">
-              Join 4,200+ teams turning reviews into a growth engine with
-              GReviewPilot.
+              Turn your reviews into a growth engine with GReviewPilot.
             </p>
             <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-              <GradientButton href="#">
+              <GradientButton href="/auth?mode=signup">
                 Start free <ArrowRight className="h-4 w-4" />
               </GradientButton>
-              <GradientButton href="#" variant="outline">
+              <GradientButton href="/contact" variant="outline">
                 Book a demo
               </GradientButton>
             </div>
             <div className="mt-8 max-w-md">
               <CheckList
                 items={[
-                  "14-day free trial · no credit card",
-                  "Migrate from any tool in one week",
+                  "7-day free trial · no credit card",
+                  "Import your existing locations",
                   "Cancel anytime, keep your data",
                 ]}
               />

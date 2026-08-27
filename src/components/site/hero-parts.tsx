@@ -68,7 +68,7 @@ export function HeroDashboard() {
             </div>
             <div className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground sm:flex">
               <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
-              sathi.app / dashboard
+              greviewpilot.com / dashboard
             </div>
             <div className="text-[11px] text-muted-foreground">Live</div>
           </div>
@@ -186,7 +186,7 @@ export function HeroDashboard() {
                 <div className="mt-2 rounded-lg border border-primary/20 bg-primary/[0.04] p-2">
                   <div className="mb-1 flex items-center justify-between text-[10px] text-primary">
                     <span className="flex items-center gap-1">
-                      <Sparkles className="h-2.5 w-2.5" /> Sathi AI · warm tone
+                      <Sparkles className="h-2.5 w-2.5" /> GReviewPilot AI · warm tone
                     </span>
                     <span className="text-muted-foreground">98% match</span>
                   </div>
@@ -414,7 +414,6 @@ export function FeatureCard({
       <div
         className={`pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-br ${accent} opacity-0 transition-opacity duration-500 group-hover:opacity-100`}
       />
-      <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 ring-gradient transition-opacity duration-500 group-hover:opacity-100" />
       <div className="relative flex items-start justify-between">
         <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[image:var(--gradient-brand)] text-white shadow-glow transition-transform duration-500 group-hover:scale-110 group-hover:rotate-3">
           <Icon className="h-5 w-5" />

@@ -238,12 +238,15 @@ export function Header({
                 <button
                   onClick={() => {
                     setShowProfileMenu(false);
-                    onTriggerToast("Google API Connection Verified (SOC 2 Aligned)");
+                    // Previously read "Google API Connection Verified
+                    // (SOC 2 Aligned)". The certification claim was not
+                    // substantiated, and it appeared inside the product UI.
+                    onTriggerToast("Google connection active — credentials stored encrypted");
                   }}
                   className="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition"
                 >
                   <ShieldCheck className="h-4 w-4 text-emerald-500" />
-                  <span>Security & Compliance</span>
+                  <span>Security</span>
                 </button>
 
                 <div className="my-1.5 border-t border-slate-100" />

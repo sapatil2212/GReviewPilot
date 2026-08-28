@@ -6,7 +6,7 @@
  */
 
 import { prisma } from "@/server/db/prisma";
-import { TenantStatus, TenantPlan, UserStatus, UserRole, AuditAction, ReviewStatus } from "@prisma/client";
+import { Prisma, TenantStatus, TenantPlan, UserStatus, UserRole, AuditAction, ReviewStatus } from "@prisma/client";
 import { auditRepository } from "@/server/repositories/audit.repository";
 import { env } from "@/server/utils/env";
 
@@ -169,7 +169,7 @@ export const superAdminService = {
     const limit = Math.min(100, Math.max(1, query.limit || 15));
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: Prisma.TenantWhereInput = {};
 
     if (query.status) {
       where.status = query.status;
@@ -292,7 +292,7 @@ export const superAdminService = {
     const limit = Math.min(100, Math.max(1, query.limit || 15));
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: Prisma.UserWhereInput = {};
 
     if (query.status) {
       where.status = query.status;
@@ -380,7 +380,7 @@ export const superAdminService = {
   // ============================================================
   async getAuditLogs(query: { search?: string; action?: string; limit?: number } = {}) {
     const limit = Math.min(100, Math.max(1, query.limit || 30));
-    const where: any = {};
+    const where: Prisma.AuditLogWhereInput = {};
 
     if (query.action) {
       where.action = query.action as AuditAction;

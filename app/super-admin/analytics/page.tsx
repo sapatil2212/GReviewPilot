@@ -24,8 +24,25 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 
+/**
+ * Shape of /api/super-admin/stats, narrowed to the fields this page reads.
+ * Deliberately partial: the endpoint returns more, and re-declaring all of it
+ * here would drift from the service.
+ */
+interface AnalyticsResponse {
+  stats: {
+    ratingBreakdown: Array<{ stars: number; count: number }>;
+    overview: {
+      totalAiReplies: number;
+      totalQrCodes: number;
+      totalQrScans: number;
+      totalSites: number;
+    };
+  };
+}
+
 export default function SuperAdminAnalyticsPage() {
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<AnalyticsResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchAnalytics = async () => {
@@ -58,7 +75,7 @@ export default function SuperAdminAnalyticsPage() {
     );
   }
 
-  const { stats, analytics } = data;
+  const { stats } = data;
 
   return (
     <div className="space-y-8">
@@ -85,7 +102,7 @@ export default function SuperAdminAnalyticsPage() {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={stats.ratingBreakdown}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                <XAxis dataKey="stars" stroke="#64748b" fontSize={11} tickFormatter={(v: any) => `${v} Stars`} />
+                <XAxis dataKey="stars" stroke="#64748b" fontSize={11} tickFormatter={(v: number | string) => `${v} Stars`} />
                 <YAxis stroke="#64748b" fontSize={11} />
                 <Tooltip
                   contentStyle={{

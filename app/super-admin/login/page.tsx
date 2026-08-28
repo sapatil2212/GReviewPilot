@@ -50,8 +50,12 @@ export default function SuperAdminLoginPage() {
       toast.success("Super Admin Authenticated Successfully!");
       router.push("/super-admin");
       router.refresh();
-    } catch (err: any) {
-      toast.error(err.message || "Failed to authenticate Super Admin");
+    } catch (err) {
+      toast.error(
+        err instanceof Error && err.message
+          ? err.message
+          : "Failed to authenticate Super Admin",
+      );
     } finally {
       setLoading(false);
     }

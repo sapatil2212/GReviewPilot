@@ -9,7 +9,7 @@ interface AuditLogItem {
   action: string;
   ipAddress: string | null;
   userAgent: string | null;
-  metadata: any;
+  metadata: unknown;
   createdAt: string;
   user: {
     id: string;

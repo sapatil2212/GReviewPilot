@@ -27,7 +27,12 @@ export async function PATCH(
     const body = await req.json();
     const parsed = updateTenantSchema.parse(body);
 
-    let updatedTenant: any = null;
+    // Derived from the service so this stays correct if either return type
+    // changes. Both branches are optional, hence the null.
+    let updatedTenant:
+      | Awaited<ReturnType<typeof superAdminService.updateTenantStatus>>
+      | Awaited<ReturnType<typeof superAdminService.updateTenantPlan>>
+      | null = null;
 
     if (parsed.status) {
       updatedTenant = await superAdminService.updateTenantStatus(

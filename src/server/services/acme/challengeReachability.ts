@@ -26,6 +26,7 @@
 
 import { randomBytes } from "node:crypto";
 import { acmeChallengeStore } from "./challengeStore";
+import { env } from "@/server/utils/env";
 import { logger } from "@/server/utils/logger";
 
 export interface ChallengeReachability {
@@ -48,6 +49,85 @@ export interface ChallengeReachability {
 
 /** Matches the CA's own patience for a single validation request. */
 const TIMEOUT_MS = 8000;
+
+export interface UpstreamIdentity {
+  /** True only when the sentinel came back, proving this is our app. */
+  confirmed: boolean;
+  detail: string;
+}
+
+/**
+ * Prove that `APP_UPSTREAM` is *this* application.
+ *
+ * Not "something is listening" — that question is nearly useless and answering
+ * it caused real damage. The previous check fetched an unknown ACME token and
+ * accepted a 404 as success, but every Next.js app on the box returns 404 for an
+ * unknown path, so a port belonging to an entirely different application passed
+ * with a tick. nginx then proxied a tenant's custom domain straight into that
+ * other app, and the tenant's visitors saw somebody else's website while ACME
+ * validation failed with a 404 that looked like an nginx routing problem.
+ *
+ * On a server hosting several apps behind one nginx, ports get reused and
+ * reassigned. So identity is established positively: a sentinel is written to
+ * this app's own database and the upstream is asked to read it back. Only the
+ * real app, connected to the real database, can answer.
+ */
+export async function checkUpstreamIdentity(): Promise<UpstreamIdentity> {
+  const token = `preflight-${randomBytes(24).toString("base64url")}`;
+  const expected = randomBytes(32).toString("base64url");
+  const upstream = env.APP_UPSTREAM;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    await acmeChallengeStore.put(token, expected, "upstream-identity-probe");
+
+    const res = await fetch(`http://${upstream}/.well-known/acme-challenge/${token}`, {
+      signal: controller.signal,
+      redirect: "manual",
+      headers: { "User-Agent": "GReviewPilot-UpstreamProbe/1.0" },
+      cache: "no-store",
+    });
+
+    const body = (await res.text()).trim();
+
+    if (res.ok && body === expected) {
+      return { confirmed: true, detail: `${upstream} is this application.` };
+    }
+
+    if (res.status === 404) {
+      return {
+        confirmed: false,
+        detail:
+          `Something is listening on ${upstream}, but it is NOT this application — ` +
+          "it did not return a token stored in this app's database. nginx is proxying " +
+          "every custom domain into that other process, which is why visitors see the " +
+          "wrong website and ACME validation returns 404. Point APP_UPSTREAM at the " +
+          "port this app actually listens on (pm2 describe <name> | grep -i port, or " +
+          "check the PORT it was started with) and restart.",
+      };
+    }
+
+    return {
+      confirmed: false,
+      detail:
+        `${upstream} answered ${res.status} instead of the stored token, so it is not ` +
+        "this application. Check APP_UPSTREAM.",
+    };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "AbortError";
+    return {
+      confirmed: false,
+      detail: aborted
+        ? `${upstream} did not respond in time.`
+        : `Nothing is listening on ${upstream}. Start the app, or correct APP_UPSTREAM.`,
+    };
+  } finally {
+    clearTimeout(timer);
+    await acmeChallengeStore.remove(token);
+  }
+}
 
 export async function checkChallengeReachability(
   hostname: string,
@@ -119,6 +199,20 @@ export async function checkChallengeReachability(
             "that stored the token — check that pm2 and the CLI load the same .env.",
         };
       }
+      // Two very different faults produce this, and the upstream probe separates
+      // them: either nginx never routed the request to us, or it routed it
+      // perfectly into a process that is not this app. The second is easy to
+      // create on a box running several apps behind one nginx, and it presents as
+      // the tenant's domain serving somebody else's website.
+      const upstream = await checkUpstreamIdentity().catch(() => null);
+      if (upstream && !upstream.confirmed) {
+        return {
+          reachable: false,
+          blocking: true,
+          detail: `APP_UPSTREAM is wrong. ${upstream.detail}`,
+        };
+      }
+
       return {
         reachable: false,
         blocking: true,

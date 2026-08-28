@@ -304,6 +304,51 @@ server {
     "the TLS default_server presents its own certificate for any unmatched host",
   );
 
+  // Upstream collision: nginx routes the hostname perfectly and still serves the
+  // wrong product, because the port it forwards to belongs to another app. This
+  // is invisible from the application side and from nginx's own error log, so the
+  // per-block proxy_pass has to be recoverable in order to report it.
+  const shared = parseServerBlocks(`
+# configuration file /etc/nginx/sites-enabled/primeinbox:
+server {
+    listen 80;
+    server_name primeinbox.example;
+    location / {
+        proxy_pass http://127.0.0.1:3003;
+    }
+}
+# configuration file /etc/nginx/greviewpilot-sites/greviewpilot-greviewhub.com.conf:
+server {
+    listen 80;
+    server_name greviewhub.com;
+    location / {
+        proxy_pass http://127.0.0.1:3003;
+    }
+}
+`);
+  check(
+    "collects proxy_pass per server block",
+    shared.every((b) => b.proxyPasses.includes("http://127.0.0.1:3003")),
+    shared.map((b) => b.proxyPasses.join()).join(" | "),
+  );
+  {
+    // The same grouping the CLI reports, asserted here so the detection cannot
+    // silently stop working.
+    const byUpstream = new Map<string, Set<string>>();
+    for (const block of shared) {
+      for (const target of block.proxyPasses) {
+        const key = target.replace(/^https?:\/\//, "");
+        if (!byUpstream.has(key)) byUpstream.set(key, new Set());
+        byUpstream.get(key)!.add(block.serverNames.join(","));
+      }
+    }
+    check(
+      "detects one upstream shared by two different sites",
+      byUpstream.get("127.0.0.1:3003")?.size === 2,
+      [...(byUpstream.get("127.0.0.1:3003") ?? [])].join(" + "),
+    );
+  }
+
   // Conflicting server_name: nginx keeps the first and ignores the rest.
   const conflict = parseServerBlocks(`
 # configuration file /etc/nginx/sites-enabled/other:

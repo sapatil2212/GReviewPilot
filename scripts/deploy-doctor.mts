@@ -542,32 +542,35 @@ function tcpProbe(hostport: string, timeout = 5000) {
 }
 
 if (await tcpProbe(env.APP_UPSTREAM)) {
-  pass("app is listening on APP_UPSTREAM", env.APP_UPSTREAM);
+  console.log(`  something is listening on ${env.APP_UPSTREAM} — identifying it below`);
 } else {
-  warn(
+  fail(
     "nothing listening on APP_UPSTREAM",
-    `${env.APP_UPSTREAM} — start the app (pm2 start) before provisioning, or nginx will 502`,
+    `${env.APP_UPSTREAM} — start the app (pm2 start) or nginx will 502 every custom domain`,
   );
 }
 
-// The ACME challenge path must reach the app and must not redirect. This checks
-// the app directly; the CA reaches it through nginx on port 80.
+// Identity, not liveness.
+//
+// This check used to fetch an unknown ACME token and treat 404 as success. Every
+// Next.js app answers 404 for an unknown path, so a port belonging to a
+// completely different application on the same box passed with a tick — and nginx
+// then proxied every tenant's custom domain into that other app. Visitors got
+// somebody else's website and ACME validation 404'd, in a way that looked like an
+// nginx routing fault for days. A sentinel written to this app's database and read
+// back through the upstream can only be answered by the real app.
 try {
-  const res = await fetch(`http://${env.APP_UPSTREAM}/.well-known/acme-challenge/doctor-probe`, {
-    redirect: "manual",
-  });
-  if (res.status === 404) {
-    pass("app serves the ACME challenge route", "404 for an unknown token, as expected");
-  } else if (res.status >= 300 && res.status < 400) {
-    fail(
-      "ACME challenge path redirects",
-      `${res.status} -> ${res.headers.get("location")}. HTTP-01 validation will fail`,
-    );
+  const { checkUpstreamIdentity } = await import(
+    "../src/server/services/acme/challengeReachability"
+  );
+  const identity = await checkUpstreamIdentity();
+  if (identity.confirmed) {
+    pass("APP_UPSTREAM is this application", env.APP_UPSTREAM);
   } else {
-    warn("unexpected status on the ACME challenge route", String(res.status));
+    fail("APP_UPSTREAM is NOT this application", identity.detail);
   }
-} catch {
-  warn("could not reach the ACME challenge route", "app not running?");
+} catch (err) {
+  warn("could not verify APP_UPSTREAM identity", (err as Error).message.split("\n")[0]);
 }
 
 try {

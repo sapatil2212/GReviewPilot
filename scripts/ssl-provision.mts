@@ -250,6 +250,54 @@ async function inspectNginx(hostname: string) {
     );
   }
 
+  // Identity of the upstream, then the full port map.
+  //
+  // nginx can route a hostname flawlessly and still serve the wrong website, if
+  // the port it forwards to belongs to a different application. On a box running
+  // several apps behind one nginx that is easy to do and invisible from the
+  // application's own logs, so it is checked before anything else.
+  const { checkUpstreamIdentity } = await import(
+    "../src/server/services/acme/challengeReachability"
+  );
+  const identity = await checkUpstreamIdentity().catch((err) => ({
+    confirmed: false,
+    detail: String(err),
+  }));
+  console.log(
+    `  ${identity.confirmed ? "+" : "x"} APP_UPSTREAM (${env.APP_UPSTREAM}) is this app — ${identity.detail}`,
+  );
+
+  // Which upstream every site on this nginx forwards to. A port appearing under
+  // two different sites is the collision that causes a tenant's domain to serve
+  // another product.
+  const byUpstream = new Map<string, Set<string>>();
+  for (const block of config.blocks) {
+    for (const target of block.proxyPasses) {
+      const key = target.replace(/^https?:\/\//, "").replace(/\/$/, "");
+      const label = block.serverNames.filter((n) => n !== "_").join(",") || block.file;
+      if (!byUpstream.has(key)) byUpstream.set(key, new Set());
+      byUpstream.get(key)!.add(label);
+    }
+  }
+  if (byUpstream.size > 0) {
+    console.log("\n  upstreams used by every site on this nginx:");
+    for (const [target, users] of [...byUpstream.entries()].sort()) {
+      const ours = target === env.APP_UPSTREAM;
+      console.log(
+        `    ${ours ? "*" : " "} ${target.padEnd(22)} ${[...users].join("  ")}${ours ? "   <- APP_UPSTREAM" : ""}`,
+      );
+    }
+    const shared = [...byUpstream.entries()].find(
+      ([target, users]) => target === env.APP_UPSTREAM && users.size > 1,
+    );
+    if (shared) {
+      console.log(
+        `\n      x ${shared[0]} is shared by more than one site: ${[...shared[1]].join(", ")}\n` +
+          "        Whichever application actually owns that port serves all of them.",
+      );
+    }
+  }
+
   const expectedFile = nginxManager.vhostPath(hostname);
   for (const port of ["80", "443"]) {
     const result = selectFor(config.blocks, hostname, port);
@@ -290,6 +338,15 @@ async function inspectNginx(hostname: string) {
           console.log(
             `        forwards /.well-known/acme-challenge/: ${block.servesAcmeChallenge ? "yes" : "NO"}`,
           );
+          // Routing correctly into the wrong process looks identical to not
+          // routing at all, from everywhere except here.
+          if (winner && ours && !identity.confirmed) {
+            console.log(
+              "        ! nginx routes this hostname correctly, but the port it forwards to\n" +
+                "          is not this app — so visitors get whatever app owns that port.\n" +
+                "          This is the fault; the vhost is fine.",
+            );
+          }
         }
       }
       if (result.conflicting) {

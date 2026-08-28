@@ -298,6 +298,15 @@ nginx, `APP_URL` is nginx's own public address, so inferring the upstream from
 proxying plain HTTP into nginx's TLS listener. Env validation rejects those ports
 rather than letting the loop reach a config file.
 
+**It must also be the port *this* app listens on, and on a shared box that is
+worth checking rather than assuming.** This is the single highest-consequence
+value in the file. Every tenant custom domain is proxied to it, so if it names a
+port owned by another application, every custom domain serves that application's
+website — and nothing in this app's logs says so, because the requests never
+arrive. `npm run doctor` proves identity by writing a sentinel to the database and
+reading it back through the upstream; it fails rather than warns when the answer
+comes from something else.
+
 `CRON_SECRET` must be a real generated value. The cron routes are enabled the
 moment it is non-empty, so a placeholder means anyone who guesses it can trigger
 the jobs:
@@ -529,10 +538,38 @@ npm run ssl:provision -- --diagnose clinic.com
 
 Fix the **first** `x`. The bottom two lines are usually symptoms of it.
 
-**The domain shows a different website, and ACME returns 404.**
-This is the sharpest version of the problem, and it happens when another app
-shares the box. The vhost exists, `nginx -t` passes, the reload succeeds — and
-nginx never consults it. Three causes, none visible to a grep over `/etc/nginx`:
+**The domain shows a different product's website.**
+On a box running several apps behind one nginx, this is the most likely fault of
+all, and the least obvious: **`APP_UPSTREAM` points at a port owned by another
+application.** nginx routes the hostname flawlessly and proxies it straight into
+somebody else's product. Every generated vhost is correct, `--nginx` shows ours
+serving the hostname, and visitors still get the wrong site.
+
+Ports get reused and reassigned when apps are added, so "something is listening
+on that port" proves nothing. Identity is established positively — a sentinel is
+written to this app's database and read back through the upstream, which only the
+real app can do:
+
+```bash
+npm run doctor                                # "APP_UPSTREAM is this application"
+npm run ssl:provision -- --nginx clinic.com   # lists every site's upstream
+```
+
+`--nginx` prints the upstream of every site on the nginx, so one port serving two
+products is visible at a glance. Find the real port and correct `APP_UPSTREAM`:
+
+```bash
+pm2 describe greviewpilot | grep -iE "script args|exec cwd|port"
+sudo ss -ltnp | grep node        # every listening node process and its PID
+```
+
+The same fault also makes ACME validation return 404, because the challenge
+request reaches the other app, which knows nothing about the token.
+
+**The domain shows a bare `404 Not Found — nginx`, or another site, and ACME
+returns 404.**
+The vhost exists, `nginx -t` passes, the reload succeeds — and nginx never
+consults it. Three causes, none visible to a grep over `/etc/nginx`:
 
 ```bash
 npm run ssl:provision -- --nginx clinic.com   # reads nginx -T, run as root
@@ -636,7 +673,7 @@ detects the proxy: the A record won't match `SITE_APEX_IP`.
 
 | Command | Covers |
 |---|---|
-| `npm run doctor` | directory writability, sudo reload helper, live `nginx -t`, include glob, `$connection_upgrade` map, default-server `/.well-known/` carve-out, **every CONNECTED domain has a vhost**, DB, upstream, unused env vars |
+| `npm run doctor` | directory writability, sudo reload helper, live `nginx -t`, include glob, `$connection_upgrade` map, default-server `/.well-known/` carve-out, **every CONNECTED domain is served by its own vhost**, **`APP_UPSTREAM` really is this app**, DB, unused env vars |
 | `npm run ssl:provision -- --diagnose <host>` | one domain end to end: DB row, DNS, vhost, certificate on disk, CAA, live ACME path, served certificate, plus the nginx report below. Read-only, contacts no CA |
 | `npm run ssl:provision -- --nginx <host>` | reads `nginx -T` and names the server block that actually serves the hostname on 80 and 443, whether our vhost directory is loaded at all, hostname collisions, and listen-address hazards |
 | `npm run verify:nginx` | vhost generation (HTTPS, alias, and HTTP-only bootstrap), config-injection rejection, ACME path preserved on port 80, upstream not pointing at nginx |

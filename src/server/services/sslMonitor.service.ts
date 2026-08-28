@@ -16,7 +16,11 @@
 import { SiteDomainStatus, SiteSslStatus, AuditAction } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { auditRepository } from "@/server/repositories/audit.repository";
-import { reconcileCertificate, reverifyDomain } from "@/server/services/siteDomain.service";
+import {
+  reconcileCertificate,
+  reverifyDomain,
+  type IssuanceOutcome,
+} from "@/server/services/siteDomain.service";
 import { RENEWAL_WARNING_DAYS } from "@/server/services/tlsCertificate.service";
 import {
   provisionCertificate,
@@ -163,24 +167,47 @@ export async function runSslMonitor(
           // reflects the certificate that will actually be serving traffic.
           // provisionCertificate is idempotent and reuses anything with more
           // than 30 days left, so this is cheap on most runs.
+          let issuance: IssuanceOutcome | null = null;
           if (provisioningEnabled() && current.status === SiteDomainStatus.CONNECTED) {
             const result = await provisionCertificate(current).catch((err) => {
               logger.error("Renewal attempt failed", {
                 hostname: domain.hostname,
                 err: err instanceof Error ? err.message : String(err),
               });
-              return null;
+              return {
+                action: "failed" as const,
+                reason: err instanceof Error ? err.message : String(err),
+                httpOnly: false,
+                notAfter: null,
+              };
             });
-            if (result && (result.action === "issued" || result.action === "renewed")) {
+            issuance = {
+              action: result.action,
+              reason: result.reason,
+              httpOnly: result.httpOnly ?? false,
+            };
+            if (result.action === "issued" || result.action === "renewed") {
               report.renewed += 1;
               logger.info("Certificate renewed by monitor", {
                 hostname: domain.hostname,
                 notAfter: result.notAfter?.toISOString() ?? null,
               });
+            } else if (result.action === "failed") {
+              // Logged at error level with the reason so the cron output names the
+              // cause. A domain that silently never gets a certificate is the
+              // failure mode this whole job exists to make visible.
+              logger.error("Certificate provisioning failed", {
+                hostname: domain.hostname,
+                reason: result.reason,
+              });
             }
           }
 
-          const { summary, transitionedToActive } = await reconcileCertificate(domain);
+          // Pass the issuance outcome in so the recorded error is the cause, not
+          // the TLS symptom the probe would otherwise overwrite it with.
+          const { summary, transitionedToActive } = await reconcileCertificate(domain, {
+            issuance,
+          });
           report.checked += 1;
 
           switch (summary.sslStatus) {

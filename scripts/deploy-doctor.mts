@@ -339,6 +339,116 @@ if (!onLinux) {
         "every generated vhost will fail nginx -t. See docs/CUSTOM-DOMAINS-VPS.md step 2",
       );
   }
+
+  // A default server that answers unknown hostnames with a plain 404 is correct
+  // for visitors but wrong for the two well-known paths: the ACME challenge and
+  // the routing probe. Both are fetched on a hostname that may not have a server
+  // block yet. The app now installs an HTTP-only vhost before requesting a
+  // certificate, which removes the hard dependency, but the carve-out is still
+  // what lets a CNAME/proxied domain prove routing in the first place.
+  const defaultServers = await run("grep", ["-rl", "default_server", "/etc/nginx/"]);
+  if (!defaultServers.ok) {
+    warn(
+      "no default_server found in /etc/nginx",
+      "any domain pointed at this IP gets served by whichever vhost nginx considers " +
+        "first. See docs/CUSTOM-DOMAINS-VPS.md step 3",
+    );
+  } else {
+    const files = defaultServers.out.split("\n").filter(Boolean);
+    const bodies = await Promise.all(
+      files.map((file) => fs.readFile(file, "utf8").catch(() => "")),
+    );
+    const combined = bodies.join("\n");
+    if (combined.includes("/.well-known/")) {
+      pass("default server forwards /.well-known/", files.join(", "));
+    } else {
+      warn(
+        "default server does not forward /.well-known/",
+        `${files.join(", ")} — a domain with no vhost of its own cannot answer the routing ` +
+          "probe, so CNAME and proxied (Cloudflare) domains may never verify. Add the " +
+          "acme-challenge and greviewpilot-domain-check carve-out from step 3",
+      );
+    }
+  }
+
+  // Generated vhosts that are on disk but not loadable are invisible otherwise.
+  const vhostFiles = await fs.readdir(env.NGINX_VHOST_PATH).catch(() => null);
+  if (vhostFiles === null) {
+    skip("generated vhosts", `cannot read ${env.NGINX_VHOST_PATH}`);
+  } else {
+    const generated = vhostFiles.filter((f) => f.startsWith("greviewpilot-"));
+    if (generated.length === 0) {
+      console.log(
+        `  No generated vhosts yet in ${env.NGINX_VHOST_PATH}. Expected until the first\n` +
+          "  domain is verified — every CONNECTED domain should have one, and a CONNECTED\n" +
+          "  domain without one is served by the default server (a 404).",
+      );
+    } else {
+      pass(`${generated.length} generated vhost(s) present`, env.NGINX_VHOST_PATH);
+      const bootstrapOnly: string[] = [];
+      for (const file of generated) {
+        const body = await fs
+          .readFile(path.posix.join(env.NGINX_VHOST_PATH, file), "utf8")
+          .catch(() => "");
+        if (body && !body.includes("listen 443")) bootstrapOnly.push(file);
+      }
+      if (bootstrapOnly.length > 0) {
+        warn(
+          `${bootstrapOnly.length} domain(s) still on the HTTP-only bootstrap vhost`,
+          `${bootstrapOnly.join(", ")} — live over HTTP but no certificate yet. Run: ` +
+            "npm run ssl:provision -- --diagnose <hostname>",
+        );
+      }
+    }
+  }
+}
+
+// =====================================================================
+heading("Connected domains without a vhost");
+
+// The failure that motivated this check: a domain verifies, the dashboard shows
+// CONNECTED, and visitors get "404 Not Found — nginx" because no server block was
+// ever written for it. Nothing in the UI surfaced the gap, and the hourly job
+// could not close it, because a vhost used to be written only after a certificate
+// had been issued — and issuance needed the vhost to exist.
+if (!onLinux) {
+  skip("connected-domain vhost audit", "nginx paths are not on this machine");
+} else if (env.SSL_PROVISIONING !== "nginx") {
+  skip("connected-domain vhost audit", "SSL_PROVISIONING is not nginx");
+} else {
+  try {
+    const { PrismaClient } = await import("@prisma/client");
+    const prisma = new PrismaClient();
+    const connected = await prisma.siteDomain.findMany({
+      where: { status: "CONNECTED" },
+      select: { hostname: true, sslStatus: true },
+    });
+    await prisma.$disconnect();
+
+    if (connected.length === 0) {
+      console.log("  No CONNECTED custom domains yet.");
+    } else {
+      const { nginxManager } = await import(
+        "../src/server/services/nginx/nginxManager.service"
+      );
+      const missing: string[] = [];
+      for (const domain of connected) {
+        const has = await nginxManager.hasVhost(domain.hostname).catch(() => false);
+        if (!has) missing.push(domain.hostname);
+      }
+      if (missing.length === 0) {
+        pass(`all ${connected.length} connected domain(s) have a vhost`);
+      } else {
+        fail(
+          `${missing.length} connected domain(s) have NO nginx vhost`,
+          `${missing.join(", ")} — these hostnames 404 for visitors right now. Fix with: ` +
+            "npm run ssl:provision -- --all",
+        );
+      }
+    }
+  } catch (err) {
+    warn("could not audit connected domains", (err as Error).message.split("\n")[0]);
+  }
 }
 
 // =====================================================================

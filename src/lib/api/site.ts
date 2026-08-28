@@ -143,6 +143,22 @@ export interface CaaCheckDto {
   message: string | null;
 }
 
+/**
+ * What the certificate-provisioning attempt reported.
+ *
+ * Separate from the TLS observation because the two answer different questions.
+ * The probe says what a visitor sees; this says whether the platform managed to
+ * obtain a certificate and why not. A domain reporting "the certificate being
+ * served does not cover this domain" whose actual problem is an unreachable
+ * validation path needs the second sentence, not the first.
+ */
+export interface IssuanceOutcomeDto {
+  action: "issued" | "renewed" | "reused" | "skipped" | "failed";
+  reason: string;
+  /** Site is live over plain HTTP while HTTPS is still being obtained. */
+  httpOnly: boolean;
+}
+
 /** Result of inspecting the live certificate for a domain. */
 export interface SslSummaryDto {
   sslStatus: SslStatusDto;
@@ -155,6 +171,7 @@ export interface SslSummaryDto {
   problems: string[];
   summary: string;
   caa: CaaCheckDto | null;
+  issuance: IssuanceOutcomeDto | null;
   checkedAt: string;
 }
 

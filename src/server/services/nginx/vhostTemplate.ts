@@ -22,6 +22,12 @@ export interface VhostOptions {
   redirectTo?: string | null;
 }
 
+export interface HttpOnlyVhostOptions {
+  hostname: string;
+  /** Where the Next.js app listens, e.g. "127.0.0.1:3000". */
+  upstream: string;
+}
+
 /** Prefix on every generated file, so unrelated vhosts are never touched. */
 export const VHOST_PREFIX = "greviewpilot-";
 
@@ -54,6 +60,97 @@ function assertSafePath(label: string, value: string): void {
 }
 
 /**
+ * The `location /` block that hands a request to the app.
+ *
+ * Shared by the HTTPS vhost and the HTTP-only bootstrap vhost so the two cannot
+ * drift. They differ only in which listener wraps them, and a difference in
+ * forwarded headers between the two would mean a site behaved differently before
+ * and after its certificate arrived — a class of bug that is very hard to see.
+ */
+function proxyLocation(upstream: string): string {
+  return `    location / {
+        proxy_pass http://${upstream};
+        proxy_http_version 1.1;
+
+        # Host must be preserved: middleware.ts routes the request to the right
+        # tenant site by inspecting it. Rewriting it here would serve the
+        # dashboard instead of the customer's website.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        # Server-sent events and streamed responses must not be buffered.
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+
+        proxy_connect_timeout 10s;
+        proxy_read_timeout    120s;
+    }`;
+}
+
+/** The ACME carve-out. Must be present on every port-80 listener we generate. */
+function acmeLocation(upstream: string): string {
+  return `    # Must stay on plain HTTP and must never redirect: renewals revalidate here
+    # every 60 days.
+    location ^~ /.well-known/acme-challenge/ {
+        proxy_pass http://${upstream};
+        proxy_set_header Host $host;
+        access_log off;
+    }`;
+}
+
+/**
+ * Port-80-only server block, used before a certificate exists.
+ *
+ * This exists to break a deadlock that made custom domains unusable. The full
+ * vhost below references `ssl_certificate`, so it cannot be installed until a
+ * certificate has been issued — but issuance needs
+ * `http://<domain>/.well-known/acme-challenge/` to reach this app, which needs a
+ * server block for that hostname. With neither in place the request fell to
+ * nginx's default server, which answers unknown hosts with a bare 404, so the CA
+ * saw 404, issuance failed, no vhost was ever written, and the domain sat
+ * `CONNECTED` while visitors got `404 Not Found — nginx`. Nothing in the loop
+ * could advance it, including the hourly retry.
+ *
+ * Installing this first fixes both halves at once: validation always lands on
+ * the app via the domain's own server block, with no dependence on how the
+ * operator configured the default server, and the tenant's site is live over
+ * HTTP within seconds of DNS verifying instead of 404ing until TLS is sorted
+ * out. It is replaced by the full HTTP+HTTPS block as soon as a certificate
+ * exists.
+ *
+ * Deliberately no `return 308 https://` here: redirecting to HTTPS before a
+ * certificate covers the hostname sends visitors to a browser warning, and
+ * would break the very validation this block exists to enable.
+ */
+export function renderHttpOnlyVhost(options: HttpOnlyVhostOptions): string {
+  assertSafeHostname(options.hostname);
+  assertSafePath("upstream", options.upstream);
+
+  const host = options.hostname.toLowerCase();
+
+  return `# Managed by GReviewPilot — do not edit.
+# HTTP-only bootstrap for ${host}. No certificate covers this hostname yet, so
+# there is no TLS listener: serving one with another domain's certificate would
+# show every visitor a browser warning. Replaced automatically by the full
+# HTTP + HTTPS block once a certificate is issued.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${host};
+
+${acmeLocation(options.upstream)}
+
+${proxyLocation(options.upstream)}
+}
+`;
+}
+
+/**
  * Build the server block for one custom domain.
  *
  * Port 80 is not blanket-redirected to HTTPS: `/.well-known/acme-challenge/`
@@ -75,27 +172,7 @@ export function renderVhost(options: VhostOptions): string {
     ? `    # Alias domain: redirect at the edge rather than proxying, so the
     # canonical host is reached in one hop and the app never sees the alias.
     return 308 https://${target}$request_uri;`
-    : `    location / {
-        proxy_pass http://${options.upstream};
-        proxy_http_version 1.1;
-
-        # Host must be preserved: middleware.ts routes the request to the right
-        # tenant site by inspecting it. Rewriting it here would serve the
-        # dashboard instead of the customer's website.
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host  $host;
-
-        # Server-sent events and streamed responses must not be buffered.
-        proxy_set_header Upgrade    $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_buffering off;
-
-        proxy_connect_timeout 10s;
-        proxy_read_timeout    120s;
-    }`;
+    : proxyLocation(options.upstream);
 
   return `# Managed by GReviewPilot — do not edit.
 # Generated for ${host}. Changes are overwritten when the domain is
@@ -106,13 +183,7 @@ server {
     listen [::]:80;
     server_name ${host};
 
-    # Must stay on plain HTTP and must never redirect: renewals revalidate here
-    # every 60 days.
-    location ^~ /.well-known/acme-challenge/ {
-        proxy_pass http://${options.upstream};
-        proxy_set_header Host $host;
-        access_log off;
-    }
+${acmeLocation(options.upstream)}
 
     location / {
         return 308 https://$host$request_uri;

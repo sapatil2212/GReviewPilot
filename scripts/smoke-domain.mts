@@ -605,6 +605,50 @@ try {
     a.action === "skipped",
     `${a.action}: ${a.reason} (provisioning ${provisioningEnabled() ? "on" : "off"})`,
   );
+
+  // -------------------------------------------------------------------
+  console.log("\nPre-certificate serving (the deadlock that stranded domains)");
+  // A vhost used to be written only after a certificate had been issued, while
+  // issuance itself needed /.well-known/acme-challenge/ to be reachable on that
+  // hostname — which needed a vhost. Neither side could go first, so a verified
+  // domain got no server block at all: visitors saw nginx's default-server 404
+  // and the CA saw the same 404, failing every attempt including the hourly
+  // retry. The HTTP-only block is what breaks the cycle, so its two defining
+  // properties are asserted here rather than left to the nginx unit checks.
+  const bootstrapVhost = nginxManager.previewHttpOnly(aliasApex);
+  check(
+    "a domain can be served before any certificate exists",
+    !bootstrapVhost.includes("ssl_certificate") && bootstrapVhost.includes("listen 80;"),
+    "the bootstrap vhost must not reference a certificate that has not been issued",
+  );
+  check(
+    "the ACME path is reachable on a domain with no certificate",
+    /location \^~ \/\.well-known\/acme-challenge\/ \{[^}]*proxy_pass/s.test(bootstrapVhost) &&
+      !bootstrapVhost.includes("return 308"),
+    "without this, HTTP-01 validation can never succeed for a new domain",
+  );
+
+  // The preflight must not report success for a hostname that resolves nowhere,
+  // and must classify it as inconclusive rather than blocking — a hard failure
+  // here would stop issuance on servers that cannot reach their own public IP.
+  const { checkChallengeReachability } = await import(
+    "../src/server/services/acme/challengeReachability"
+  );
+  const unreachable = await checkChallengeReachability(`nx-${Date.now()}.example`);
+  check(
+    "ACME preflight reports an unresolvable host as unreachable",
+    !unreachable.reachable,
+    unreachable.detail,
+  );
+  check(
+    "a network failure is inconclusive, not a hard block on issuance",
+    !unreachable.blocking,
+    "blocking on an inconclusive probe would break issuance behind NAT without hairpinning",
+  );
+  const leftover = await prisma.acmeChallenge.count({
+    where: { token: { startsWith: "preflight-" } },
+  });
+  check("preflight sentinels are cleaned up", leftover === 0, `${leftover} left behind`);
 } finally {
   await prisma.tenant.delete({ where: { id: tenant.id } }).catch((err) => {
     console.error("Cleanup failed — remove tenant manually:", tenant.id, err);

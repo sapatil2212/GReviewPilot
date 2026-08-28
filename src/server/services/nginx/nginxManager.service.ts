@@ -18,7 +18,12 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { env } from "@/server/utils/env";
 import { logger } from "@/server/utils/logger";
-import { renderVhost, vhostFilename, assertSafeHostname } from "./vhostTemplate";
+import {
+  renderVhost,
+  renderHttpOnlyVhost,
+  vhostFilename,
+  assertSafeHostname,
+} from "./vhostTemplate";
 
 export class NginxError extends Error {
   constructor(message: string) {
@@ -85,33 +90,23 @@ export const nginxManager = {
   },
 
   /**
-   * Install (or replace) the server block for a domain and reload nginx.
+   * Write a rendered server block and reload, rolling back if nginx rejects it.
    *
-   * Restores the previous file if nginx rejects the new one, so a bad write
-   * cannot leave the box in a state where nginx refuses to start.
+   * Restoring the previous content before surfacing the error matters: a bad
+   * write that stayed on disk would make every *subsequent* reload fail too,
+   * including reloads triggered by unrelated domains, so one bad vhost would
+   * freeze provisioning for the whole box.
    */
-  async install(options: {
-    hostname: string;
-    certPath: string;
-    keyPath: string;
-    redirectTo?: string | null;
-  }): Promise<void> {
+  async writeAndReload(hostname: string, config: string): Promise<void> {
     if (!this.enabled()) {
       throw new NginxError("SSL_PROVISIONING is not set to nginx");
     }
 
-    const target = this.vhostPath(options.hostname);
-    const config = renderVhost({
-      hostname: options.hostname,
-      certPath: options.certPath,
-      keyPath: options.keyPath,
-      upstream: upstream(),
-      redirectTo: options.redirectTo ?? null,
-    });
+    const target = this.vhostPath(hostname);
 
     const previous = await fs.readFile(target, "utf8").catch(() => null);
     if (previous === config) {
-      logger.debug("nginx vhost unchanged", { hostname: options.hostname });
+      logger.debug("nginx vhost unchanged", { hostname });
       return;
     }
 
@@ -120,7 +115,7 @@ export const nginxManager = {
 
     try {
       await runReload();
-      logger.info("nginx vhost installed", { hostname: options.hostname, target });
+      logger.info("nginx vhost installed", { hostname, target });
     } catch (err) {
       // Put the old config back before surfacing the error, so the next reload
       // (by us or by an operator) starts from a state nginx accepts.
@@ -130,11 +125,58 @@ export const nginxManager = {
         await fs.writeFile(target, previous, { mode: 0o644 }).catch(() => undefined);
       }
       logger.error("nginx rejected the new vhost; rolled back", {
-        hostname: options.hostname,
+        hostname,
         err: err instanceof Error ? err.message : String(err),
       });
       throw err;
     }
+  },
+
+  /**
+   * Install (or replace) the full HTTP + HTTPS server block for a domain.
+   *
+   * Requires a certificate to already exist on disk — nginx refuses to start
+   * with an `ssl_certificate` it cannot read, so this must never run before
+   * issuance succeeds. Use `installHttpOnly` for that phase.
+   */
+  async install(options: {
+    hostname: string;
+    certPath: string;
+    keyPath: string;
+    redirectTo?: string | null;
+  }): Promise<void> {
+    await this.writeAndReload(
+      options.hostname,
+      renderVhost({
+        hostname: options.hostname,
+        certPath: options.certPath,
+        keyPath: options.keyPath,
+        upstream: upstream(),
+        redirectTo: options.redirectTo ?? null,
+      }),
+    );
+  },
+
+  /**
+   * Install the port-80-only server block used before a certificate exists.
+   *
+   * Two jobs: it makes `/.well-known/acme-challenge/` reachable on the domain's
+   * own hostname so HTTP-01 validation can succeed at all, and it puts the
+   * tenant's site live over HTTP immediately instead of leaving visitors on
+   * nginx's default-server 404 until TLS is sorted out. See
+   * renderHttpOnlyVhost() for why this ordering is required rather than merely
+   * nicer.
+   */
+  async installHttpOnly(hostname: string): Promise<void> {
+    await this.writeAndReload(hostname, renderHttpOnlyVhost({ hostname, upstream: upstream() }));
+  },
+
+  /** True when a generated server block for this hostname is on disk. */
+  async hasVhost(hostname: string): Promise<boolean> {
+    return fs
+      .access(this.vhostPath(hostname))
+      .then(() => true)
+      .catch(() => false);
   },
 
   /** Remove a domain's server block and reload. Safe when the file is absent. */
@@ -177,5 +219,10 @@ export const nginxManager = {
       upstream: upstream(),
       redirectTo: options.redirectTo ?? null,
     });
+  },
+
+  /** Preview the pre-certificate bootstrap config. */
+  previewHttpOnly(hostname: string): string {
+    return renderHttpOnlyVhost({ hostname, upstream: upstream() });
   },
 };

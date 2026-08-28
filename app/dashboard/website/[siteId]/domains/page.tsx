@@ -806,12 +806,16 @@ function DomainStatus({ status }: { status: DomainStatusDto }) {
  */
 function SslPanel({ report }: { report: SslSummaryDto }) {
   const caaBlocked = report.caa?.permitted === false;
+  const issuanceFailed = report.issuance?.action === "failed";
+  // The site is reachable over HTTP while HTTPS is still being obtained, so this
+  // is "not finished" rather than "broken" and should not read as an outage.
+  const liveOverHttp = report.issuance?.httpOnly === true && !report.valid;
 
   const tone = report.valid
     ? report.renewalDue
       ? "border-amber-100 bg-amber-50 text-amber-900"
       : "border-emerald-100 bg-emerald-50 text-emerald-900"
-    : caaBlocked
+    : caaBlocked || issuanceFailed
       ? "border-red-100 bg-red-50 text-red-900"
       : "border-slate-100 bg-slate-50 text-slate-700";
 
@@ -844,12 +848,23 @@ function SslPanel({ report }: { report: SslSummaryDto }) {
             </p>
           )}
 
-          {!report.valid && !caaBlocked && report.problems.includes("unreachable") && (
-            <p className="mt-0.5 opacity-80">
-              This is normal for the first few minutes after DNS starts resolving. Certificates are
-              usually issued within 15 minutes.
+          {liveOverHttp && (
+            <p className="mt-1 opacity-90">
+              Your site is already live on this domain over <code className="font-mono">http://</code>{" "}
+              — visitors can reach it now. Only the HTTPS certificate is still outstanding, and we
+              keep retrying hourly.
             </p>
           )}
+
+          {!report.valid &&
+            !caaBlocked &&
+            !issuanceFailed &&
+            report.problems.includes("unreachable") && (
+              <p className="mt-0.5 opacity-80">
+                This is normal for the first few minutes after DNS starts resolving. Certificates are
+                usually issued within 15 minutes.
+              </p>
+            )}
 
           <p className="mt-1 text-[10px] opacity-60">
             Checked {new Date(report.checkedAt).toLocaleTimeString()}

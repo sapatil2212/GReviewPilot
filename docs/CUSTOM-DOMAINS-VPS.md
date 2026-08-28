@@ -29,6 +29,37 @@ Two things must hold or nothing works:
    `return 301 https://...` on port 80 makes the first certificate work and every
    renewal fail two months later. The generated config carves out that path.
 
+### Two phases, not one
+
+A domain does not go from "DNS verified" straight to HTTPS. It passes through an
+HTTP-only phase, and that phase is load-bearing rather than a nicety:
+
+| Phase | vhost | What visitors get |
+|---|---|---|
+| DNS verified, no certificate yet | port 80 only, proxies everything to the app | the site, over `http://` |
+| Certificate issued | ports 80 + 443, 80 redirects (except ACME) | the site, over `https://` |
+
+The reason is a circular dependency. The HTTPS server block names
+`ssl_certificate`, so nginx will not load it until a certificate exists — but
+obtaining that certificate requires Let's Encrypt to fetch
+`http://<domain>/.well-known/acme-challenge/<token>`, which requires a server
+block for that hostname. Writing the vhost only *after* issuance succeeded meant
+neither side could go first:
+
+```
+no vhost  ->  CA's request hits nginx's default server  ->  404
+          ->  validation fails  ->  no certificate  ->  no vhost
+```
+
+Visitors saw `404 Not Found — nginx` while the dashboard said **Connected**, and
+the hourly retry hit the identical wall every hour, forever. Installing the
+HTTP-only block first breaks it: validation always lands on the app through the
+domain's own server block, and the tenant's site is live within seconds of DNS
+resolving instead of 404ing until TLS is sorted out.
+
+`npm run ssl:provision -- --diagnose <domain>` prints this chain one link per
+line, so the first `x` is the thing to fix.
+
 ---
 
 ## One-time server setup
@@ -101,8 +132,19 @@ server {
     listen [::]:80 default_server;
     server_name _;
 
-    # Newly-pointed domains validate here before their own vhost exists.
-    location ^~ /.well-known/acme-challenge/ {
+    # Both well-known paths must reach the app, not this 404.
+    #
+    #   acme-challenge          — a domain being provisioned for the first time
+    #   greviewpilot-domain-check — the routing probe, which is the ONLY way a
+    #                             CNAME or Cloudflare-proxied domain can prove it
+    #                             reaches this server (its address will never
+    #                             equal SITE_APEX_IP, so the record comparison
+    #                             cannot decide it)
+    #
+    # Forwarding the whole /.well-known/ prefix covers both and anything added
+    # later. Narrowing it to acme-challenge alone is what leaves proxied domains
+    # unable to verify at all.
+    location ^~ /.well-known/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
     }
@@ -117,8 +159,14 @@ server {
 sudo ln -s /etc/nginx/sites-available/000-default /etc/nginx/sites-enabled/
 ```
 
-That ACME carve-out matters: a domain's first certificate is requested before its
-vhost is installed, so validation lands on the default server.
+Since provisioning now installs an HTTP-only vhost before requesting a
+certificate, ACME validation no longer depends on this block — but the routing
+probe still does, for any domain that does not resolve straight to
+`SITE_APEX_IP`. And the `return 404` half is what stops a stranger's domain
+pointed at your IP from being served some arbitrary tenant's site: without a
+`default_server`, nginx serves whichever vhost it happens to consider first.
+
+If you have no `default_server` at all, `npm run doctor` says so.
 
 ### 4. Privileged reload helper
 
@@ -235,6 +283,14 @@ allows about 5 certificates per domain per week; burning that while wiring thing
 up locks that domain out of HTTPS for days with no appeal. Staging certificates
 are real but untrusted — enough to prove the pipeline works.
 
+**Do not leave it on `staging`.** It is a first-run setting, and forgetting it is
+its own failure mode: issuance succeeds, logs look clean, and every visitor gets
+a full-page browser warning while the dashboard reports `SSL failed`. Two things
+make the switch low-risk now — provisioning confirms the validation path is
+reachable before submitting an order, so failed attempts no longer eat the weekly
+budget, and a staging certificate is recorded as `PENDING` with an explicit
+warning rather than `ACTIVE`, so it cannot be mistaken for working HTTPS.
+
 **`APP_UPSTREAM` must be set and must not be 80 or 443.** It is the local address
 nginx forwards tenant traffic to. It cannot be derived from `APP_URL`: behind
 nginx, `APP_URL` is nginx's own public address, so inferring the upstream from
@@ -348,10 +404,28 @@ curl -vI https://yourdomain.com 2>&1 | grep -i "issuer\|subject"
 # 5. Now tenant domains. Add one in the dashboard, point DNS, press Verify.
 #    Wait for status CONNECTED before going further — issuing against a domain
 #    that doesn't resolve to you wastes a rate-limited attempt.
+npm run ssl:provision -- --diagnose clinic.com   # read-only, no CA contact
 npm run ssl:provision -- --preview clinic.com    # inspect what would be written
 npm run ssl:provision -- --host clinic.com       # staging
 npm run ssl:provision -- --host clinic.com --force  # after switching to production
 ```
+
+### Already stuck? (domains connected, sites 404, SSL failed)
+
+If domains were added before this was working, they have no nginx vhost and no
+certificate. One command fixes all of them, and it is safe to re-run:
+
+```bash
+npm run doctor                       # confirm nginx prerequisites first
+npm run ssl:provision -- --all       # installs vhosts + issues certificates
+npm run doctor                       # should now report 0 domains without a vhost
+```
+
+`--all` walks every CONNECTED domain, installs the HTTP-only vhost, confirms the
+validation path answers, then orders the certificate and swaps in the HTTPS
+vhost. Domains whose validation path is genuinely broken are skipped with the
+reason rather than burning an attempt, so nothing is lost by running it before
+every underlying problem is fixed.
 
 After that, tenants connect domains through the dashboard with no manual step:
 Verify triggers issuance automatically once DNS resolves. The platform's own
@@ -422,6 +496,43 @@ normal and correct, not a bug.
 
 ## When it doesn't work
 
+Start here, always. It contacts no certificate authority, writes nothing, and
+prints the whole chain in the order it has to hold:
+
+```bash
+npm run ssl:provision -- --diagnose clinic.com
+```
+
+```
+  + known domain     status=CONNECTED ssl=FAILED
+  + DNS A record     77.37.47.89
+  x nginx vhost      /etc/nginx/greviewpilot-sites/greviewpilot-clinic.com.conf  (absent)
+  x certificate      none at /var/www/storage/greviewpilot/certs/clinic.com/fullchain.pem
+  + CAA              none (any CA may issue)
+  x ACME HTTP path   The ACME validation path returned 404. ...
+  x live HTTPS       The certificate being served does not cover this domain.
+```
+
+Fix the **first** `x`. The bottom two lines are usually symptoms of it.
+
+**The domain shows `404 Not Found — nginx` but the dashboard says Connected.**
+The single most common failure, and the one that looks least like its cause.
+There is no nginx server block for that hostname, so nginx answers from its
+default server. `--diagnose` reports `nginx vhost  (absent)`. Fix:
+
+```bash
+npm run ssl:provision -- --host clinic.com
+```
+
+That now installs the HTTP-only vhost first, so the site is live over HTTP even
+if the certificate step then fails — and the certificate step can finally
+succeed, because validation has somewhere to land. `npm run doctor` audits every
+CONNECTED domain for a missing vhost and fails if it finds one.
+
+If provisioning reports `nginx could not be configured for this domain`, the
+cause is in the message: usually `NGINX_VHOST_PATH` not writable by the app user,
+or the sudo reload helper prompting for a password.
+
 **"SSL pending" forever, `--host` reports validation failure.**
 The CA could not fetch the challenge. Check it from outside the box:
 
@@ -431,10 +542,23 @@ curl -i http://clinic.com/.well-known/acme-challenge/test
 
 Expect 404 from the app, *not* a redirect and not tenant site HTML. A 301/308
 means something is redirecting port 80 to HTTPS — the usual culprit is a
-hand-written vhost or a Cloudflare "Always Use HTTPS" rule.
+hand-written vhost or a Cloudflare "Always Use HTTPS" rule. Provisioning runs
+this same request itself before ordering, and refuses to spend a rate-limited
+attempt when the answer is definitely wrong, so the reason now appears on the
+domain rather than as a generic authorization failure.
 
 **Certificate issued, browser still warns.**
-`ACME_DIRECTORY` is still `staging`. Set production and re-run with `--force`.
+`ACME_DIRECTORY` is still `staging`. Staging certificates are real and issue
+successfully — the pipeline looks like it worked — but no browser trusts them, so
+the dashboard reports `SSL failed` with "not trusted by browsers" and visitors get
+a full-page warning. Set production and re-run with `--force`:
+
+```bash
+npm run ssl:provision -- --host clinic.com --force
+```
+
+`--diagnose` names it explicitly when the certificate on disk was issued by the
+staging CA.
 
 **`nginx -t` fails: unknown variable "connection_upgrade".**
 The `map` from step 2 is missing.
@@ -469,8 +593,9 @@ detects the proxy: the A record won't match `SITE_APEX_IP`.
 
 | Command | Covers |
 |---|---|
-| `npm run doctor` | directory writability, sudo reload helper, live `nginx -t`, include glob, `$connection_upgrade` map, DB, upstream, unused env vars |
-| `npm run verify:nginx` | vhost generation, config-injection rejection, ACME path preserved on port 80, upstream not pointing at nginx |
+| `npm run doctor` | directory writability, sudo reload helper, live `nginx -t`, include glob, `$connection_upgrade` map, default-server `/.well-known/` carve-out, **every CONNECTED domain has a vhost**, DB, upstream, unused env vars |
+| `npm run ssl:provision -- --diagnose <host>` | one domain end to end: DB row, DNS, vhost, certificate on disk, CAA, live ACME path, served certificate. Read-only, contacts no CA |
+| `npm run verify:nginx` | vhost generation (HTTPS, alias, and HTTP-only bootstrap), config-injection rejection, ACME path preserved on port 80, upstream not pointing at nginx |
 | `npm run verify:nginx:syntax` | brace/terminator structure, and real `nginx -t` when available |
 | `npm run verify:tls` | certificate inspection against valid/expired/mismatched/self-signed hosts, CAA logic |
 | `npm run smoke:domain` | custom-domain routing, canonical redirects, SSL reconciliation, cron auth |

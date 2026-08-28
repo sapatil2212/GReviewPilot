@@ -25,7 +25,9 @@ try {
   // Already-populated environments are fine.
 }
 
-const { renderVhost } = await import("../src/server/services/nginx/vhostTemplate");
+const { renderVhost, renderHttpOnlyVhost } = await import(
+  "../src/server/services/nginx/vhostTemplate"
+);
 
 let failures = 0;
 function check(name: string, condition: boolean, detail?: string) {
@@ -50,7 +52,15 @@ const configs = {
     upstream: "127.0.0.1:3000",
     redirectTo: "clinic.com",
   }),
+  // The pre-certificate block. Included here because it is the config a domain
+  // runs on for the minutes (or, if issuance is failing, days) between DNS
+  // verifying and HTTPS working — so it reaches a live reload just as often as
+  // the others, and a syntax error in it would be just as fatal.
+  bootstrap: renderHttpOnlyVhost({ hostname: "new.clinic.com", upstream: "127.0.0.1:3000" }),
 };
+
+/** Port-80-only by design, so it has one server block where the others have two. */
+const expectedServerBlocks: Record<string, number> = { proxy: 2, alias: 2, bootstrap: 1 };
 
 /** Strip comments and string literals before counting structural characters. */
 function structuralLines(config: string): string[] {
@@ -84,7 +94,12 @@ for (const [label, config] of Object.entries(configs)) {
   );
 
   const serverBlocks = lines.filter((line) => line === "server {").length;
-  check(`${label}: has two server blocks (80 and 443)`, serverBlocks === 2, String(serverBlocks));
+  const expected = expectedServerBlocks[label] ?? 2;
+  check(
+    `${label}: has ${expected} server block(s)`,
+    serverBlocks === expected,
+    String(serverBlocks),
+  );
 
   // A stray quote would unbalance the config.
   const quotes = (config.match(/"/g) ?? []).length;
@@ -118,6 +133,7 @@ if (probe.out.toLowerCase().includes("nginx version")) {
     await fs.mkdir(vhostDir, { recursive: true });
     await fs.writeFile(path.join(vhostDir, "proxy.conf"), configs.proxy);
     await fs.writeFile(path.join(vhostDir, "alias.conf"), configs.alias);
+    await fs.writeFile(path.join(vhostDir, "bootstrap.conf"), configs.bootstrap);
 
     const main = `events {}
 http {

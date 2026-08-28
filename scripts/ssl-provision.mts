@@ -7,11 +7,15 @@
  *
  * Usage:
  *   npm run ssl:provision -- --check                  show configuration and exit
+ *   npm run ssl:provision -- --diagnose clinic.com    explain why HTTPS is not working
  *   npm run ssl:provision -- --preview clinic.com     print the nginx vhost
  *   npm run ssl:provision -- --host clinic.com        provision one domain
  *   npm run ssl:provision -- --all                    provision every connected domain
  *   npm run ssl:provision -- --host clinic.com --force  reissue even if valid
  *   npm run ssl:provision -- --platform                provision the app's own hostname(s)
+ *
+ * `--diagnose` contacts no certificate authority and changes nothing, so it is
+ * always safe to run and is the right first step for a domain that is stuck.
  *
  * Start with --check, then --preview, then a single --host against
  * ACME_DIRECTORY=staging. Only switch to production once a staging certificate
@@ -79,6 +83,13 @@ async function main() {
     heading(`nginx vhost for ${previewHost}`);
     console.log(`  would be written to: ${nginxManager.vhostPath(previewHost)}\n`);
     console.log(nginxManager.preview({ hostname: previewHost, ...paths }));
+    return;
+  }
+
+  // ---- Diagnose one hostname without contacting the CA ----
+  const diagnoseHost = value("diagnose");
+  if (diagnoseHost) {
+    await diagnose(diagnoseHost);
     return;
   }
 
@@ -170,13 +181,142 @@ async function main() {
       console.log(`  ${result.action === "failed" ? "x" : "+"} ${domain.hostname.padEnd(32)} ${result.action}  ${result.reason}`);
     }
     console.log(failed === 0 ? "\nDone." : `\n${failed} domain(s) failed.`);
-    process.exitCode = failed === 0 ? 1 : 0;
+    // Was inverted: a clean run exited 1 and a run with failures exited 0, so
+    // this command reported the opposite of the truth to any shell or CI using it.
+    process.exitCode = failed === 0 ? 0 : 1;
     return;
   }
 
   console.log(
-    "\nNothing to do. Pass --check, --preview <host>, --host <host>, or --all.\n" +
-      "See the header of this file for the recommended order.",
+    "\nNothing to do. Pass --check, --diagnose <host>, --preview <host>, --host <host>,\n" +
+      "or --all. See the header of this file for the recommended order.",
+  );
+}
+
+/**
+ * Explain why a hostname does or does not have working HTTPS, without spending an
+ * ACME attempt.
+ *
+ * Written because the failure this feature actually hits in production is silent
+ * from every angle: DNS looks right, the dashboard says CONNECTED, and the only
+ * visible symptom is a bare nginx 404 with a certificate error that names the
+ * wrong cause. Each line below is one link in the chain, printed in the order it
+ * has to hold, so the first `x` is the thing to fix.
+ */
+async function diagnose(hostname: string) {
+  const { nginxManager } = await import("../src/server/services/nginx/nginxManager.service");
+  const { readCertificateOnDisk, hasCertificateFiles, certificatePaths } = await import(
+    "../src/server/services/acme/certificateIssuer.service"
+  );
+  const { checkChallengeReachability } = await import(
+    "../src/server/services/acme/challengeReachability"
+  );
+  const { checkCaa } = await import("../src/server/services/siteDomain.service");
+  const { inspectCertificate } = await import(
+    "../src/server/services/tlsCertificate.service"
+  );
+
+  heading(`Diagnosing ${hostname}`);
+
+  // 1. Is it even known to the app?
+  const domain = await prisma.siteDomain.findUnique({ where: { hostname } });
+  if (domain) {
+    console.log(`  + known domain     status=${domain.status} ssl=${domain.sslStatus}`);
+    if (domain.lastError) console.log(`      last error: ${domain.lastError}`);
+  } else {
+    const { platformHostnames } = await import("../src/server/services/sslProvisioning.service");
+    const { primary, aliases } = platformHostnames();
+    if (hostname === primary || aliases.includes(hostname)) {
+      console.log("  + platform hostname (from APP_URL) — not a tenant domain");
+    } else {
+      console.log(
+        "  x unknown hostname — no SiteDomain row and not a platform hostname.\n" +
+          "      Requests for it are routed as a tenant custom domain and will 404.",
+      );
+    }
+  }
+
+  // 2. DNS.
+  const dns = await import("node:dns/promises");
+  const resolver = new dns.Resolver({ timeout: 4000, tries: 2 });
+  resolver.setServers(["1.1.1.1", "8.8.8.8"]);
+  try {
+    const addrs = await resolver.resolve4(hostname);
+    const pointsHere = addrs.includes(env.SITE_APEX_IP);
+    console.log(
+      `  ${pointsHere ? "+" : "!"} DNS A record     ${addrs.join(", ")}` +
+        (pointsHere ? "" : `   (SITE_APEX_IP is ${env.SITE_APEX_IP})`),
+    );
+    if (!pointsHere) {
+      console.log(
+        "      Not fatal on its own — a proxy or load balancer in front is normal —\n" +
+          "      but validation and TLS both have to reach THIS server.",
+      );
+    }
+  } catch {
+    console.log(`  x DNS A record     does not resolve`);
+  }
+
+  // 3. nginx server block. This is the link that was missing.
+  const vhostPath = nginxManager.vhostPath(hostname);
+  const hasVhost = await nginxManager.hasVhost(hostname).catch(() => false);
+  console.log(
+    `  ${hasVhost ? "+" : "x"} nginx vhost      ${vhostPath}${hasVhost ? "" : "  (absent)"}`,
+  );
+  if (!hasVhost) {
+    console.log(
+      "      With no server block for this hostname, nginx answers from its default\n" +
+        "      server — a bare 404 for visitors, and a 404 for the CA's validation\n" +
+        "      request, which is why issuance fails. Provisioning now installs an\n" +
+        "      HTTP-only block first to break exactly this loop; run:\n" +
+        `        npm run ssl:provision -- --host ${hostname}`,
+    );
+  }
+
+  // 4. Certificate on disk.
+  const onDisk = await readCertificateOnDisk(hostname);
+  const files = await hasCertificateFiles(hostname);
+  if (onDisk) {
+    const days = Math.floor((onDisk.notAfter.getTime() - Date.now()) / 86_400_000);
+    console.log(
+      `  + certificate      issuer="${onDisk.issuer ?? "?"}" expires ${onDisk.notAfter.toISOString().slice(0, 10)} (${days}d)`,
+    );
+    if (/STAGING|Fake/i.test(onDisk.issuer ?? "")) {
+      console.log(
+        "      This is a Let's Encrypt STAGING certificate. Browsers reject it.\n" +
+          "      Set ACME_DIRECTORY=production, restart the app, then reissue with --force.",
+      );
+    }
+  } else {
+    console.log(`  x certificate      none at ${certificatePaths(hostname).certPath}`);
+    if (files) console.log("      Files exist but could not be parsed.");
+  }
+
+  // 5. CAA.
+  const caa = await checkCaa(hostname).catch(() => null);
+  if (!caa) console.log("  ! CAA              lookup failed");
+  else if (!caa.present) console.log("  + CAA              none (any CA may issue)");
+  else
+    console.log(
+      `  ${caa.permitted ? "+" : "x"} CAA              at ${caa.foundAt}: ${caa.authorised.join(", ")}${caa.permitted ? "" : `   ${caa.message}`}`,
+    );
+
+  // 6. The request the CA will actually make.
+  const reach = await checkChallengeReachability(hostname);
+  console.log(
+    `  ${reach.reachable ? "+" : reach.blocking ? "x" : "!"} ACME HTTP path   ${reach.detail}`,
+  );
+
+  // 7. What a visitor's browser sees.
+  const report = await inspectCertificate(hostname);
+  console.log(`  ${report.valid ? "+" : "x"} live HTTPS       ${report.summary}`);
+  if (report.altNames.length > 0) {
+    console.log(`      served certificate covers: ${report.altNames.join(", ")}`);
+  }
+
+  console.log(
+    "\n  Read top to bottom and fix the first x. A missing nginx vhost explains\n" +
+      "  both a 404 for visitors and a failed ACME validation at once.",
   );
 }
 

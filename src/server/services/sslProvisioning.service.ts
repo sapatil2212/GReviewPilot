@@ -26,6 +26,7 @@ import {
   issueCertificate,
   readCertificateOnDisk,
 } from "@/server/services/acme/certificateIssuer.service";
+import { checkChallengeReachability } from "@/server/services/acme/challengeReachability";
 import { nginxManager } from "@/server/services/nginx/nginxManager.service";
 import { RENEWAL_WARNING_DAYS } from "@/server/services/tlsCertificate.service";
 import { env } from "@/server/utils/env";
@@ -38,6 +39,15 @@ export interface ProvisionResult {
   reason: string;
   notAfter: Date | null;
   staging: boolean;
+  /**
+   * True when the domain is currently served by the port-80-only bootstrap
+   * vhost, i.e. the site is live over HTTP but HTTPS is not ready.
+   *
+   * Worth reporting separately from the failure reason because it changes what
+   * the tenant should be told: "your site is live, HTTPS is still finishing" is a
+   * different message from "your domain is not working".
+   */
+  httpOnly: boolean;
 }
 
 /** True when provisioning is this app's job at all. */
@@ -90,6 +100,7 @@ async function issueOrReuseCertificateUncoordinated(
     reason,
     notAfter: null,
     staging,
+    httpOnly: false,
   });
 
   if (!provisioningEnabled()) {
@@ -104,6 +115,7 @@ async function issueOrReuseCertificateUncoordinated(
       reason: caa.message ?? "CAA records block certificate issuance.",
       notAfter: null,
       staging,
+      httpOnly: false,
     };
   }
 
@@ -126,10 +138,80 @@ async function issueOrReuseCertificateUncoordinated(
       reason: `Certificate is valid for another ${remaining} days.`,
       notAfter: existing.notAfter,
       staging,
+      httpOnly: false,
     };
   }
 
   const renewing = existing !== null;
+
+  // ---------------------------------------------------------------
+  // Make the hostname serveable BEFORE talking to the CA.
+  // ---------------------------------------------------------------
+  // Validation fetches http://<hostname>/.well-known/acme-challenge/<token>, so
+  // nginx needs a server block for this hostname that forwards it. Until a
+  // certificate exists the only block that can be installed is the HTTP-only
+  // one, which is why it comes first. Skipping this step is what left domains
+  // permanently stuck: no vhost meant the CA hit the default server's 404,
+  // issuance failed, and because the vhost is only written *after* a successful
+  // issuance, nothing ever created the thing that would have let it succeed.
+  // The hourly retry ran into the identical wall every hour.
+  //
+  // It also means the tenant's site answers on HTTP straight away rather than
+  // showing nginx's 404 while HTTPS is still being sorted out.
+  const alreadyServed = await nginxManager.hasVhost(hostname).catch(() => false);
+  if (!alreadyServed) {
+    try {
+      if (renewing) {
+        // A certificate survived but its vhost did not (rebuilt box, manual
+        // deletion). Restore the real block rather than downgrading to HTTP.
+        const { certPath, keyPath } = certificatePaths(hostname);
+        await nginxManager.install({
+          hostname,
+          certPath,
+          keyPath,
+          redirectTo: options.redirectTo ?? null,
+        });
+      } else {
+        await nginxManager.installHttpOnly(hostname);
+      }
+    } catch (err) {
+      // Fatal, and worth failing on before spending an ACME attempt: nginx is
+      // the serving path on this deployment, so a vhost that cannot be written
+      // or loaded means the domain could not go live even with a certificate in
+      // hand. Reporting the nginx error is far more actionable than the
+      // authorization failure it would otherwise turn into.
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("Could not install the bootstrap vhost", { hostname, message });
+      return {
+        hostname,
+        action: "failed",
+        reason: `nginx could not be configured for this domain: ${message}`,
+        notAfter: existing?.notAfter ?? null,
+        staging,
+        httpOnly: false,
+      };
+    }
+  }
+
+  // Run the CA's own request ourselves first. A blocking result means the order
+  // could not possibly validate, and every attempt counts against a per-hostname
+  // rate limit that takes an hour (authorizations) or a week (certificates) to
+  // clear.
+  const preflight = await checkChallengeReachability(hostname);
+  if (!preflight.reachable && preflight.blocking) {
+    logger.warn("Skipping issuance: ACME path unreachable", {
+      hostname,
+      detail: preflight.detail,
+    });
+    return {
+      hostname,
+      action: "failed",
+      reason: preflight.detail,
+      notAfter: existing?.notAfter ?? null,
+      staging,
+      httpOnly: !renewing,
+    };
+  }
 
   try {
     const issued = await issueCertificate(hostname);
@@ -144,16 +226,28 @@ async function issueOrReuseCertificateUncoordinated(
       hostname,
       action: renewing ? "renewed" : "issued",
       reason: issued.staging
-        ? "Issued from the staging directory (not browser-trusted)."
+        ? "Issued from the Let's Encrypt staging directory, which browsers do not trust. " +
+          "Set ACME_DIRECTORY=production and reissue to make HTTPS work for visitors."
         : `Certificate issued by ${issued.issuer ?? "the CA"}.`,
       notAfter: issued.notAfter,
       staging: issued.staging,
+      httpOnly: false,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const retryable = err instanceof CertificateIssuanceError ? err.retryable : true;
     logger.error("Provisioning failed", { hostname, retryable, message });
-    return { hostname, action: "failed", reason: message, notAfter: existing?.notAfter ?? null, staging };
+    return {
+      hostname,
+      action: "failed",
+      reason: message,
+      notAfter: existing?.notAfter ?? null,
+      // The bootstrap block is still in place, so the site is up over HTTP even
+      // though HTTPS failed. Reporting that keeps "domain broken" and "HTTPS not
+      // ready yet" from looking like the same thing.
+      httpOnly: !renewing,
+      staging,
+    };
   }
 }
 
@@ -195,7 +289,14 @@ export async function provisionCertificate(
   // order for a domain that does not resolve to us burns a failed-validation
   // attempt against the CA's per-domain budget for no possible benefit.
   if (domain.status !== SiteDomainStatus.CONNECTED) {
-    return { hostname, action: "skipped", reason: "DNS is not verified yet, so validation could not succeed.", notAfter: null, staging };
+    return {
+      hostname,
+      action: "skipped",
+      reason: "DNS is not verified yet, so validation could not succeed.",
+      notAfter: null,
+      staging,
+      httpOnly: false,
+    };
   }
 
   let redirectTo: string | null = null;
@@ -225,7 +326,9 @@ export async function provisionCertificate(
       sslExpiresAt: result.notAfter,
       lastCheckedAt: new Date(),
       // A staging certificate is real but untrusted by browsers, so it must not
-      // read as a clean bill of health.
+      // read as a clean bill of health. ACTIVE here would put "SSL active" in the
+      // dashboard for a site that shows every visitor a security warning.
+      ...(result.staging ? { sslStatus: SiteSslStatus.PENDING } : {}),
       lastError: result.staging
         ? "Issued against the Let's Encrypt staging directory — browsers will not trust it. Set ACME_DIRECTORY=production when ready."
         : null,
@@ -317,6 +420,7 @@ export async function provisionPlatformHostname(
       reason: `${hostname} does not resolve to anything yet. Point its DNS at this server before provisioning.`,
       notAfter: null,
       staging,
+      httpOnly: false,
     };
   }
 
@@ -345,6 +449,7 @@ export async function provisionPlatformCertificates(
         reason: "APP_URL is not a valid URL — cannot determine the platform hostname.",
         notAfter: null,
         staging: env.ACME_DIRECTORY !== "production",
+        httpOnly: false,
       },
     ];
   }

@@ -410,6 +410,20 @@ async function probeReachability(
 // Certificate reconciliation
 // =====================================================================
 
+/**
+ * What the provisioning attempt that just ran reported.
+ *
+ * Declared structurally rather than imported from sslProvisioning.service to
+ * avoid re-creating the import cycle that module already works around. It is a
+ * type, so nothing is emitted either way.
+ */
+export interface IssuanceOutcome {
+  action: "issued" | "renewed" | "reused" | "skipped" | "failed";
+  reason: string;
+  /** Site is served by the HTTP-only bootstrap vhost; HTTPS is not ready. */
+  httpOnly: boolean;
+}
+
 export interface SslSummary {
   sslStatus: SiteSslStatus;
   valid: boolean;
@@ -422,6 +436,16 @@ export interface SslSummary {
   problems: string[];
   summary: string;
   caa: CaaCheck | null;
+  /**
+   * Why issuance did or did not happen on this pass.
+   *
+   * Present because the TLS probe can only describe symptoms. "The certificate
+   * being served does not cover this domain" is what an operator saw for a
+   * domain whose real problem was that Let's Encrypt could not read the
+   * challenge path — a completely different fix. The probe result and the
+   * issuance result are both kept so the cause is reported alongside the effect.
+   */
+  issuance: IssuanceOutcome | null;
   checkedAt: string;
 }
 
@@ -450,24 +474,39 @@ function statusFor(report: CertificateReport, routable: boolean): SiteSslStatus 
  * identical rules; two implementations would inevitably disagree about when a
  * certificate counts as active.
  */
-export async function reconcileCertificate(domain: SiteDomain): Promise<{
+export async function reconcileCertificate(
+  domain: SiteDomain,
+  options: { issuance?: IssuanceOutcome | null } = {},
+): Promise<{
   summary: SslSummary;
   report: CertificateReport;
   transitionedToActive: boolean;
 }> {
   const routable = domain.status === SiteDomainStatus.CONNECTED;
   const report = await inspectCertificate(domain.hostname);
+  const issuance = options.issuance ?? null;
 
   // Only worth a CAA lookup when there is no working certificate — it explains
   // why issuance is blocked, and is noise once HTTPS is live.
   const caa = report.valid ? null : await checkCaa(domain.hostname).catch(() => null);
 
+  const issuanceFailure =
+    issuance && issuance.action === "failed" && !report.valid ? issuance.reason : null;
+
+  // Status stays a function of what the internet actually serves, which is this
+  // module's whole premise — a status derived from our own internal events can
+  // disagree with reality, and did, for a long time. A failed attempt does not
+  // make PENDING a lie either: the hourly job will try again, so "not yet" is
+  // accurate. What was missing was never the status but the reason, which the
+  // probe cannot know and which is threaded in below.
   const nextStatus = statusFor(report, routable);
   const transitionedToActive =
     nextStatus === SiteSslStatus.ACTIVE && domain.sslStatus !== SiteSslStatus.ACTIVE;
 
-  // A CAA problem is the actionable cause, so it outranks the TLS symptom.
-  const message = caa?.message ?? report.summary;
+  // Ordered by how actionable each one is: the issuance failure names the thing
+  // to fix, CAA names a DNS record to add, and the TLS summary only describes
+  // what a visitor would see.
+  const message = issuanceFailure ?? caa?.message ?? report.summary;
 
   await siteDomainRepository.update(domain.id, {
     sslStatus: nextStatus,
@@ -501,6 +540,7 @@ export async function reconcileCertificate(domain: SiteDomain): Promise<{
       problems: report.problems,
       summary: message,
       caa,
+      issuance,
       checkedAt: new Date().toISOString(),
     },
   };
@@ -831,6 +871,7 @@ export const siteDomainService = {
       // confirmed. Awaited rather than backgrounded so the tenant sees the
       // outcome on the click that caused it; a failure is recorded on the domain
       // and retried by the scheduled job, so it never blocks verification.
+      let issuance: IssuanceOutcome | null = null;
       const { provisioningEnabled, provisionCertificate } = await provisioning();
       if (provisioningEnabled()) {
         const provisioned = await provisionCertificate({ ...updated, status }).catch((err) => {
@@ -838,17 +879,34 @@ export const siteDomainService = {
             hostname: domain.hostname,
             err: String(err),
           });
-          return null;
+          // A thrown error still has to reach the tenant. Returning null here is
+          // what turned real failures into a silent "SSL pending".
+          return {
+            action: "failed" as const,
+            reason: err instanceof Error ? err.message : String(err),
+            httpOnly: false,
+          };
         });
-        if (provisioned && provisioned.action !== "skipped") {
-          logger.info("Provisioning result", {
-            hostname: domain.hostname,
+        if (provisioned) {
+          issuance = {
             action: provisioned.action,
-          });
+            reason: provisioned.reason,
+            httpOnly: provisioned.httpOnly,
+          };
+          if (provisioned.action !== "skipped") {
+            logger.info("Provisioning result", {
+              hostname: domain.hostname,
+              action: provisioned.action,
+              reason: provisioned.reason,
+            });
+          }
         }
       }
 
-      ssl = await reconcileCertificate({ ...updated, status })
+      // The issuance outcome is passed in so it survives this write. Without it
+      // reconcile overwrote `lastError` with the TLS symptom, discarding the only
+      // record of why the certificate was never obtained.
+      ssl = await reconcileCertificate({ ...updated, status }, { issuance })
         .then((r) => r.summary)
         // Verification must still succeed if the TLS probe fails; the SSL panel
         // and the scheduled job will retry.
@@ -875,6 +933,7 @@ export const siteDomainService = {
           problems: ["caa_blocked"],
           summary: caa.message ?? "CAA records block certificate issuance.",
           caa,
+          issuance: null,
           checkedAt: new Date().toISOString(),
         };
       }

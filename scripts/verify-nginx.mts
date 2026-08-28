@@ -18,9 +18,13 @@ try {
   // Already-populated environments are fine.
 }
 
-const { renderVhost, vhostFilename, assertSafeHostname, VHOST_PREFIX } = await import(
-  "../src/server/services/nginx/vhostTemplate"
-);
+const {
+  renderVhost,
+  renderHttpOnlyVhost,
+  vhostFilename,
+  assertSafeHostname,
+  VHOST_PREFIX,
+} = await import("../src/server/services/nginx/vhostTemplate");
 
 let failures = 0;
 function check(name: string, condition: boolean, detail?: string) {
@@ -144,6 +148,48 @@ check(
   acmeBlock.indexOf("acme-challenge") < acmeBlock.indexOf("return 308"),
 );
 check("other port-80 traffic is redirected to HTTPS", acmeBlock.includes("return 308 https://"));
+
+console.log("\nHTTP-only bootstrap vhost (breaks the no-cert/no-vhost deadlock):");
+// This block is what a domain gets between "DNS verified" and "certificate
+// issued". Before it existed, a vhost was only written *after* issuance
+// succeeded, but issuance needs /.well-known/acme-challenge/ to be reachable on
+// that hostname — so with no vhost the CA got nginx's default-server 404, every
+// attempt failed, and the domain sat CONNECTED while visitors saw
+// "404 Not Found — nginx". Nothing, including the hourly retry, could break out.
+const bootstrap = renderHttpOnlyVhost({ hostname: "clinic.com", upstream: base.upstream });
+check("declares the hostname", bootstrap.includes("server_name clinic.com;"));
+check("listens on port 80", bootstrap.includes("listen 80;"));
+check(
+  "has no TLS listener",
+  !bootstrap.includes("listen 443") && !bootstrap.includes("ssl_certificate"),
+  "referencing a certificate that does not exist yet makes nginx refuse to load",
+);
+check(
+  "serves the ACME challenge path",
+  bootstrap.includes("location ^~ /.well-known/acme-challenge/"),
+);
+check(
+  "never redirects to HTTPS",
+  !bootstrap.includes("return 308") && !bootstrap.includes("return 301"),
+  "a redirect here would send visitors to a certificate that does not cover the host, and would break validation",
+);
+check("proxies ordinary traffic to the app", bootstrap.includes(`proxy_pass http://${base.upstream};`));
+check("preserves the Host header", /proxy_set_header Host\s+\$host;/.test(bootstrap));
+check("marks the file as managed", bootstrap.startsWith("# Managed by GReviewPilot"));
+check(
+  "occupies the same filename as the full vhost",
+  vhostFilename("clinic.com") === "greviewpilot-clinic.com.conf",
+  "the upgrade to HTTPS must replace this file, not sit alongside it as a duplicate server_name",
+);
+{
+  let threw = false;
+  try {
+    renderHttpOnlyVhost({ hostname: "clinic.com; return 301 http://evil.com", upstream: base.upstream });
+  } catch {
+    threw = true;
+  }
+  check("rejects config injection in the hostname", threw);
+}
 
 console.log("\nAlias redirect vhost:");
 const alias = renderVhost({ ...base, hostname: "www.clinic.com", redirectTo: "clinic.com" });

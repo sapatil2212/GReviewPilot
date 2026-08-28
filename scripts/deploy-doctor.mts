@@ -94,7 +94,29 @@ else warn("ACME_CONTACT_EMAIL unset", "the CA cannot warn you if renewals stop")
 
 // The bug this catches: APP_URL is the public HTTPS address, which behind nginx
 // is nginx itself. Proxying there loops.
-pass("APP_UPSTREAM", env.APP_UPSTREAM);
+//
+// The second, worse bug: APP_UPSTREAM naming a port some *other* application on
+// this box listens on. nginx then forwards every tenant custom domain into that
+// product. PORT is what this process binds, so a disagreement between the two is
+// decidable here without probing anything.
+const { upstreamPortMismatch } = await import("../src/server/utils/env");
+if (upstreamPortMismatch) {
+  fail(
+    "APP_UPSTREAM does not match the port this app listens on",
+    `APP_UPSTREAM=${env.APP_UPSTREAM} but PORT=${upstreamPortMismatch.listening}. ` +
+      `nginx is forwarding every custom domain to port ${upstreamPortMismatch.configured}, ` +
+      "which belongs to a different process. Set " +
+      `APP_UPSTREAM="127.0.0.1:${upstreamPortMismatch.listening}" in .env (or remove it ` +
+      "entirely — it now defaults to PORT), then: pm2 restart <app> --update-env",
+  );
+} else if (process.env.PORT) {
+  pass("APP_UPSTREAM matches PORT", `${env.APP_UPSTREAM} (PORT=${process.env.PORT})`);
+} else {
+  console.log(
+    `  APP_UPSTREAM ${env.APP_UPSTREAM} — PORT is unset, so this is Next's default. ` +
+      "Verified against the running process below.",
+  );
+}
 
 if (!env.SITES_ROOT_DOMAIN) {
   console.log("  SITES_ROOT_DOMAIN unset — tenants get /s/<slug> only, no free subdomain.");
@@ -571,6 +593,31 @@ try {
   }
 } catch (err) {
   warn("could not verify APP_UPSTREAM identity", (err as Error).message.split("\n")[0]);
+}
+
+// The app should be reachable only through nginx. `next start` binds 0.0.0.0 by
+// default and prints a "Network:" address, which means the origin is directly
+// reachable on the internet: TLS is skipped, the HSTS and proxy headers nginx
+// adds are absent, tenant sites can be served on the wrong host, and rate limits
+// keyed on X-Forwarded-For see the real client as absent.
+{
+  const port = env.APP_UPSTREAM.split(":")[1] ?? "";
+  const publicAddress = /^\d{1,3}(\.\d{1,3}){3}$/.test(env.SITE_APEX_IP)
+    ? `${env.SITE_APEX_IP}:${port}`
+    : null;
+  if (!publicAddress) {
+    skip("origin port exposure", "SITE_APEX_IP is not an IPv4 address");
+  } else if (await tcpProbe(publicAddress, 4000)) {
+    warn(
+      "the app is reachable directly on its public IP, bypassing nginx",
+      `${publicAddress} answers from the internet. Bind to loopback only — add ` +
+        '`-H 127.0.0.1` to next start (or set HOSTNAME=127.0.0.1) — and/or block the ' +
+        "port at the firewall. Traffic arriving there gets no TLS, no HSTS and no " +
+        "X-Forwarded-* headers",
+    );
+  } else {
+    pass("origin port is not reachable from the internet", publicAddress);
+  }
 }
 
 try {

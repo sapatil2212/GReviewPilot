@@ -204,10 +204,20 @@ const EnvSchema = z.object({
   // address, which behind nginx is nginx itself. Deriving the upstream from it
   // produced `proxy_pass http://127.0.0.1:443`, pointing every tenant site back
   // into nginx's own TLS port.
+  //
+  // The default now follows PORT rather than being hardcoded to 3000, because the
+  // hardcoded value was actively dangerous on a server hosting several apps. Node
+  // listens on PORT; nginx forwards every tenant custom domain to APP_UPSTREAM. If
+  // those disagree, nginx proxies customer domains into whichever *other*
+  // application owns that port — the tenant's visitors get a stranger's website,
+  // ACME validation fails against an app that has never heard of the token, and
+  // nothing in this app's logs records any of it, because the requests never
+  // arrive. Deriving the default from PORT means the two cannot drift apart
+  // unless an operator overrides it deliberately.
   APP_UPSTREAM: z
     .string()
     .optional()
-    .default("127.0.0.1:3000")
+    .default(() => `127.0.0.1:${process.env.PORT?.trim() || "3000"}`)
     .refine((v) => /^[a-z0-9.-]+:\d+$/i.test(v), "APP_UPSTREAM must be host:port")
     .refine(
       (v) => !["80", "443"].includes(v.split(":")[1] ?? ""),
@@ -366,3 +376,24 @@ export const cronEnabled = Boolean(env.CRON_SECRET);
 
 /** Platform subdomains (<slug>.SITES_ROOT_DOMAIN) are only offered when configured. */
 export const sitesSubdomainEnabled = Boolean(env.SITES_ROOT_DOMAIN);
+
+/**
+ * `APP_UPSTREAM` names a port this process does not listen on.
+ *
+ * Reported rather than thrown. The consequence is severe — nginx forwards every
+ * tenant custom domain to that port, so on a server hosting several apps the
+ * tenant's visitors are served a different application entirely, and ACME
+ * validation fails against an app that has never heard of the challenge token —
+ * but it does not affect this app's own serving. Refusing to boot over it would
+ * take the dashboard and marketing site down to fix a misrouted custom domain,
+ * which is the worse outcome. Enforcement lives where the damage happens instead:
+ * provisioning refuses to issue, and `npm run doctor` fails.
+ *
+ * Null when PORT is unset, since there is then nothing to disagree with.
+ */
+export const upstreamPortMismatch: { configured: string; listening: string } | null = (() => {
+  const listening = process.env.PORT?.trim();
+  if (!listening) return null;
+  const configured = env.APP_UPSTREAM.split(":")[1] ?? "";
+  return configured === listening ? null : { configured, listening };
+})();

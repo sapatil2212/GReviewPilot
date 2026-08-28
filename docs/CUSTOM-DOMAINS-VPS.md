@@ -250,8 +250,13 @@ In `.env` on the VPS:
 ```bash
 APP_URL="https://app.yourdomain.com"
 
-# Where the Node process listens. Must be set explicitly — see the note below.
-APP_UPSTREAM="127.0.0.1:3000"
+# Port this process binds. APP_UPSTREAM derives from it, so setting PORT alone
+# keeps nginx and the app in agreement.
+PORT="3000"
+
+# Where nginx sends tenant traffic. Defaults to 127.0.0.1:$PORT — leave it unset
+# unless you need something else. See the note below.
+# APP_UPSTREAM="127.0.0.1:3000"
 
 # Your VPS public IP — tenants point root-domain A records at this.
 SITE_APEX_IP="203.0.113.10"
@@ -298,14 +303,28 @@ nginx, `APP_URL` is nginx's own public address, so inferring the upstream from
 proxying plain HTTP into nginx's TLS listener. Env validation rejects those ports
 rather than letting the loop reach a config file.
 
-**It must also be the port *this* app listens on, and on a shared box that is
-worth checking rather than assuming.** This is the single highest-consequence
-value in the file. Every tenant custom domain is proxied to it, so if it names a
-port owned by another application, every custom domain serves that application's
-website — and nothing in this app's logs says so, because the requests never
-arrive. `npm run doctor` proves identity by writing a sentinel to the database and
-reading it back through the upstream; it fails rather than warns when the answer
-comes from something else.
+**It must also be the port *this* app listens on, and on a shared box that is the
+easiest thing here to get wrong.** This is the highest-consequence value in the
+file. Every tenant custom domain is proxied to it, so if it names a port owned by
+another application, every custom domain serves that application's website — and
+nothing in this app's logs says so, because the requests never arrive.
+
+Two things now prevent it. The default is `127.0.0.1:$PORT`, so leaving
+`APP_UPSTREAM` unset makes drift impossible; and `npm run doctor` compares the two
+directly, then proves identity by writing a sentinel to the database and asking the
+upstream to read it back — something only the real app can do. Both fail rather
+than warn.
+
+`pm2 restart <app>` alone does **not** reload `.env`. Use
+`pm2 restart <app> --update-env`, or the old value stays live and every diagnostic
+keeps reporting the fault you just fixed.
+
+**Bind the origin to loopback.** `next start` listens on `0.0.0.0` by default and
+prints a `Network:` address — meaning the app is reachable straight from the
+internet on that port, with no TLS, no HSTS and no `X-Forwarded-*` headers, and
+tenant hostnames servable on the wrong port. Pass `-H 127.0.0.1` (or set
+`HOSTNAME=127.0.0.1`) so only nginx can reach it. `npm run doctor` probes the
+public IP on that port and warns if it answers.
 
 `CRON_SECRET` must be a real generated value. The cron routes are enabled the
 moment it is non-empty, so a placeholder means anyone who guesses it can trigger
@@ -546,21 +565,30 @@ somebody else's product. Every generated vhost is correct, `--nginx` shows ours
 serving the hostname, and visitors still get the wrong site.
 
 Ports get reused and reassigned when apps are added, so "something is listening
-on that port" proves nothing. Identity is established positively — a sentinel is
-written to this app's database and read back through the upstream, which only the
-real app can do:
+on that port" proves nothing — every Next.js app answers 404 for an unknown path.
+Identity is established positively instead: a sentinel is written to this app's
+database and read back through the upstream, which only the real app can do.
 
 ```bash
-npm run doctor                                # "APP_UPSTREAM is this application"
+npm run doctor                                # compares PORT, then proves identity
 npm run ssl:provision -- --nginx clinic.com   # lists every site's upstream
 ```
 
 `--nginx` prints the upstream of every site on the nginx, so one port serving two
-products is visible at a glance. Find the real port and correct `APP_UPSTREAM`:
+products is visible at a glance. The port the app actually uses is in its own
+startup banner, which is the most reliable source:
 
 ```bash
-pm2 describe greviewpilot | grep -iE "script args|exec cwd|port"
-sudo ss -ltnp | grep node        # every listening node process and its PID
+pm2 logs <app> --lines 40 | grep -A3 "next start"    # "Local: http://localhost:3005"
+sudo ss -ltnp | grep node                            # every listening node process
+```
+
+Then set it and reload the environment — `pm2 restart` on its own keeps the old
+`.env`:
+
+```bash
+pm2 restart <app> --update-env
+npm run ssl:provision -- --all      # rewrites every vhost with the right upstream
 ```
 
 The same fault also makes ACME validation return 404, because the challenge

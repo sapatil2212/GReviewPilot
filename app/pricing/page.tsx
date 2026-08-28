@@ -33,20 +33,18 @@ const compareRows = [
 
 const faqs = [
   { q: "Do I need a credit card to start?", a: "No. The Starter plan is free and requires only a Google account. You'll only be asked for payment when you upgrade to Growth or above." },
-  { q: "Can I change plans or cancel anytime?", a: "Yes. Upgrade, downgrade, or cancel from your dashboard. Cancellation stops the next renewal and you keep access until the end of the period you've already paid for — see our Refund & Cancellation Policy for the full terms." },
+  { q: "Can I change plans or cancel anytime?", a: "Yes. Upgrade, downgrade, or cancel from your dashboard. Cancellation stops the next renewal and you keep access until the end of the period you've already paid for. Fees already paid are not refunded — see our Terms & Conditions." },
   { q: "How does AI reply pricing work?", a: "Starter includes 50 AI replies per month. Growth and Enterprise are unlimited — no per-reply metering, no throttling." },
   { q: "Do you offer discounts for agencies?", a: "Yes — agencies managing multiple client locations can get bulk pricing. Reach out via the Contact page." },
   { q: "Is my customer data safe?", a: "Your Google credentials are encrypted at rest, every workspace is isolated, access is role-based, and privileged actions are recorded in an audit log. AI features process content using third-party AI services — our Privacy Policy sets out exactly what is sent, what we store, and how to delete it." },
   { q: "What happens after the free trial?", a: "Your account moves to Starter automatically. Nothing is deleted, nothing is charged — you can stay free or upgrade whenever you're ready." },
 ];
 
-// The money-back window here previously read "30-day" while the published
-// Refund & Cancellation Policy states 7 days. Rather than pick a number,
-// this now points at the policy — the policy is the authoritative statement
-// and the two must not disagree. Confirm the intended window and set it in
-// both places.
+// No money-back guarantee is offered, so nothing here may imply one. The free
+// plan and the trial are how someone evaluates the product before paying; the
+// non-refundable position is stated in the Terms.
 const guarantees = [
-  { icon: ShieldCheck, title: "Money-back window", body: "Not the right fit? See our Refund & Cancellation Policy for how refunds work." },
+  { icon: ShieldCheck, title: "Try before you pay", body: "Start on the free plan or the trial — no card required until you upgrade." },
   { icon: Zap, title: "Quick setup", body: "Connect Google Business, pick your voice, and you're live." },
   { icon: HelpCircle, title: "Real humans", body: "Email and chat support from the team that builds the product." },
 ];

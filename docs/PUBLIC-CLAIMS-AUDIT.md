@@ -98,8 +98,8 @@ Code-verified facts used as the source of truth:
 | Claim | Location | Conflicts with | Action |
 | --- | --- | --- | --- |
 | "Start 14-day trial", "after the 14-day trial" | `app/pricing/page.tsx` | `TRIAL_DAYS = 7`; navbar says "7 Day Free Trial" | Correct to 7 |
-| "30-day money back" | `app/pricing/page.tsx` | `/refund` states a 7-day window | **Flag** + neutralise |
-| "we credit the unused portion to your next invoice" | `app/pricing/page.tsx` FAQ | `/refund` states cancellation is not retroactive | **Flag** + neutralise |
+| "30-day money back" | `app/pricing/page.tsx` | No refunds are offered at all | **Removed** |
+| "we credit the unused portion to your next invoice" | `app/pricing/page.tsx` FAQ | No refunds or credits are offered | **Removed** |
 | "Setup in 8 minutes" vs "Setup in 3 minutes" vs "live in under 3 minutes" | `app/pricing/page.tsx`, `app/page.tsx` | Each other | Make non-numeric |
 | Marketing "Enterprise" vs in-app plan "Scale" | `app/pricing/page.tsx`, `app/page.tsx` | `SUBSCRIPTION_PLANS` | **Flag** |
 | "supports 20+ languages" | `app/page.tsx` FAQ | Count not evidenced in code | Soften |
@@ -130,3 +130,35 @@ Checked for "Google partner", "Google certified", "Google-endorsed",
 | RBAC, audit logs, SSO-ready, encrypted credentials | Implemented in code. |
 | "20+ languages" → "multiple languages" | Multi-language support exists; only the count was unverifiable. |
 | Site-builder preset demo data (`4.9`, `2500 customers served`) in `src/site/registry/presets.ts` | Template placeholder content for **tenant-built** websites, not GReviewPilot's own claims. |
+
+---
+
+## Follow-up: refund policy removed
+
+The business does not offer refunds, so every statement implying one has been
+removed rather than reworded:
+
+- deleted `app/refund/page.tsx` (the `/refund` route no longer exists)
+- removed the "Refund Policy" link from the footer
+- pricing page: the "Money-back window" card became "Try before you pay", and
+  the cancellation FAQ now states that fees already paid are not refunded
+- `/terms` §8 renamed to "Plans, billing and cancellation" and now states the
+  cancellation mechanics and that fees are non-refundable, with a carve-out for
+  refund rights that applicable law does not allow to be excluded
+
+`/terms` is now the single authoritative place the billing position is stated.
+
+**Flagged for the business owner:** Indian payment gateways (Razorpay, PayU,
+Cashfree) typically require a published refund/cancellation policy URL during
+onboarding, and card network rules generally expect a stated cancellation
+policy for online subscriptions. A no-refund stance is a legitimate policy, but
+it usually still has to be *published*. `/terms` §8 satisfies that if the
+gateway accepts it; if a gateway insists on a dedicated URL, the fix is a short
+page that states the same no-refund position rather than reinstating a refund
+offer. Confirm with the gateway before go-live, and have counsel review the
+wording.
+
+Unrelated matches left untouched: the AI reply guardrails in
+`src/server/ai/*` ("Never promise refunds", the resolution-tone instruction,
+and the `humanize` word-form matcher). Those stop the AI offering refunds in
+review replies, which reinforces the policy rather than contradicting it.

@@ -25,7 +25,6 @@ const company = [
   { name: "Contact", href: "/contact" },
   { name: "Privacy Policy", href: "/privacy" },
   { name: "Terms & Conditions", href: "/terms" },
-  { name: "Refund Policy", href: "/refund" },
   { name: "Cookie Policy", href: "/cookies" },
   { name: "Data Deletion", href: "/data-deletion" },
 ];

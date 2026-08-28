@@ -122,7 +122,7 @@ export default function TermsPage() {
         </p>
       </LegalSection>
 
-      <LegalSection id="billing" heading="8. Plans and billing">
+      <LegalSection id="billing" heading="8. Plans, billing and cancellation">
         <ul className="list-disc space-y-1.5 pl-5">
           <li>
             Paid plans are billed in advance for the period shown at checkout
@@ -141,6 +141,24 @@ export default function TermsPage() {
             affects your next renewal.
           </li>
         </ul>
+        <p>
+          <strong>Cancellation.</strong> Cancel at any time from your dashboard
+          or by emailing us. Cancellation stops the next renewal; it is not
+          retroactive. You keep access for the remainder of the period you have
+          already paid for, after which the account moves to the free plan. Your
+          data is not deleted when you cancel.
+        </p>
+        <p>
+          <strong>Fees are non-refundable.</strong> We do not offer refunds —
+          including for partially used periods, unused time following a
+          cancellation, or renewals you did not intend. The free plan and the
+          trial both require no payment, and exist so you can evaluate the
+          service before you upgrade.
+        </p>
+        <p>
+          Nothing above limits a right to a refund that you have under
+          applicable law and that cannot be excluded by agreement.
+        </p>
       </LegalSection>
 
       <LegalSection id="availability" heading="9. Availability">

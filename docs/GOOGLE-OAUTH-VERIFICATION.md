@@ -37,9 +37,14 @@ everything else.
 | Terms & Conditions | `/terms` | **Google — mandatory consent screen field** |
 | Data Deletion | `/data-deletion` | Google verification questionnaire |
 | Cookie Policy | `/cookies` | DPDP / GDPR |
-| Refund & Cancellation | `/refund` | Indian payment gateways |
 
-All five are live and linked from the footer, which renders on the homepage.
+All four are live and linked from the footer, which renders on the homepage.
+
+There is deliberately **no refund policy page**: the business does not offer
+refunds. The non-refundable position and the cancellation mechanics live in
+`/terms` §8 instead. Note that Indian payment gateways commonly ask for a
+published refund/cancellation policy URL during onboarding — `/terms` is the
+URL to give them.
 No dead `#` links remain.
 
 The privacy policy is written to match what the code actually does — the exact

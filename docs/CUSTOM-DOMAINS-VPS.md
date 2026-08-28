@@ -446,6 +446,20 @@ every tenant domain, so step 3/4 above only needs to run once.
 Root domains need an A record because a CNAME at a zone apex is invalid DNS.
 Everything else takes a CNAME.
 
+**Anything that resolves here is accepted, not just the exact record above.**
+Verification checks where the name actually ends up, because that is what
+matters — several correct setups never name our CNAME target:
+
+| What they have | Why it works |
+|---|---|
+| `www CNAME theirdomain.com` | chains to their own apex A record, which points here. Hostinger's UI produces this by default |
+| `www A <your SITE_APEX_IP>` | some registrars only offer A records |
+| apex `ALIAS`/`ANAME` | the provider flattens it to an A record |
+
+Reporting those as "Missing" told the customer to break something that was
+already right, so the routing check now falls back to comparing the resolved
+address against `SITE_APEX_IP`.
+
 They add it at whichever registrar holds the domain — GoDaddy, Hostinger,
 Namecheap, Cloudflare — and that is it. No TXT record, no waiting on the page, no
 support ticket. The dashboard rechecks every minute while open, and the hourly job
@@ -514,6 +528,35 @@ npm run ssl:provision -- --diagnose clinic.com
 ```
 
 Fix the **first** `x`. The bottom two lines are usually symptoms of it.
+
+**The domain shows a different website, and ACME returns 404.**
+This is the sharpest version of the problem, and it happens when another app
+shares the box. The vhost exists, `nginx -t` passes, the reload succeeds — and
+nginx never consults it. Three causes, none visible to a grep over `/etc/nginx`:
+
+```bash
+npm run ssl:provision -- --nginx clinic.com   # reads nginx -T, run as root
+```
+
+1. **The vhost directory is not in nginx's effective config.** The `include` line
+   is missing, or was pasted into a `sites-available` file that is not symlinked
+   into `sites-enabled` — where it matches every grep and is loaded by nothing.
+   Every generated vhost is then inert, so the hostname falls to whichever other
+   site nginx matches. Fix, inside `http { }` in `/etc/nginx/nginx.conf`:
+   `include /etc/nginx/greviewpilot-sites/*;`
+2. **Another server block already claims the hostname.** nginx keeps the first it
+   loads and ignores the rest, warning on reload rather than failing — so
+   `nginx -t` still passes. Remove the hostname from the other block.
+3. **The other site binds a specific address**, e.g. `listen 203.0.113.10:80`.
+   nginx chooses the listening socket *before* it looks at `server_name`, so a
+   generated vhost saying `listen 80` is in a different socket group and is never
+   consulted for requests arriving on that address.
+
+On 443 there is a fourth, benign case: before a certificate exists, a domain has
+no TLS listener at all by design, so nginx answers with whatever `443
+default_server` it has and presents that site's certificate. `--diagnose` reports
+it as `served certificate covers: <other site>`. It resolves itself the moment
+issuance succeeds; it is not the cause of anything.
 
 **The domain shows `404 Not Found — nginx` but the dashboard says Connected.**
 The single most common failure, and the one that looks least like its cause.
@@ -594,7 +637,8 @@ detects the proxy: the A record won't match `SITE_APEX_IP`.
 | Command | Covers |
 |---|---|
 | `npm run doctor` | directory writability, sudo reload helper, live `nginx -t`, include glob, `$connection_upgrade` map, default-server `/.well-known/` carve-out, **every CONNECTED domain has a vhost**, DB, upstream, unused env vars |
-| `npm run ssl:provision -- --diagnose <host>` | one domain end to end: DB row, DNS, vhost, certificate on disk, CAA, live ACME path, served certificate. Read-only, contacts no CA |
+| `npm run ssl:provision -- --diagnose <host>` | one domain end to end: DB row, DNS, vhost, certificate on disk, CAA, live ACME path, served certificate, plus the nginx report below. Read-only, contacts no CA |
+| `npm run ssl:provision -- --nginx <host>` | reads `nginx -T` and names the server block that actually serves the hostname on 80 and 443, whether our vhost directory is loaded at all, hostname collisions, and listen-address hazards |
 | `npm run verify:nginx` | vhost generation (HTTPS, alias, and HTTP-only bootstrap), config-injection rejection, ACME path preserved on port 80, upstream not pointing at nginx |
 | `npm run verify:nginx:syntax` | brace/terminator structure, and real `nginx -t` when available |
 | `npm run verify:tls` | certificate inspection against valid/expired/mismatched/self-signed hosts, CAA logic |

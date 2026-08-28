@@ -312,61 +312,101 @@ if (!onLinux) {
     }
   }
 
-  // A generated vhost that lands outside the include glob is silently ignored.
-  const nginxConf = await fs.readFile("/etc/nginx/nginx.conf", "utf8").catch(() => null);
-  if (nginxConf === null) {
-    warn("could not read /etc/nginx/nginx.conf", "skipped include/map checks");
-  } else {
-    const included =
-      nginxConf.includes(env.NGINX_VHOST_PATH) ||
-      // The include may live in a file nginx.conf itself includes.
-      (await run("grep", ["-rl", env.NGINX_VHOST_PATH, "/etc/nginx/"])).ok;
-    if (included) pass("vhost directory is included by nginx", env.NGINX_VHOST_PATH);
-    else
+  // Everything below reads `nginx -T`, the config as nginx actually assembled it.
+  //
+  // This used to grep /etc/nginx instead, and that was worse than useless: a
+  // sites-available file that is not symlinked into sites-enabled matches every
+  // grep and is loaded by nothing, so an `include` line pasted there reported a
+  // confident ✓ while generated vhosts were being ignored — the exact condition
+  // that makes a CONNECTED domain serve somebody else's site.
+  const { dumpEffectiveConfig, selectFor, includesVhostDirectory } = await import(
+    "../src/server/services/nginx/nginxInspector.service"
+  );
+
+  let effective: Awaited<ReturnType<typeof dumpEffectiveConfig>> | null = null;
+  try {
+    effective = await dumpEffectiveConfig();
+  } catch (err) {
+    warn(
+      "could not run `nginx -T`",
+      `${(err as Error).message} — run doctor as root for the include, map and ` +
+        "hostname-collision checks",
+    );
+  }
+
+  if (effective) {
+    if (includesVhostDirectory(effective)) {
+      pass("vhost directory is in nginx's effective config", env.NGINX_VHOST_PATH);
+    } else {
+      const referenced = effective.raw.includes(env.NGINX_VHOST_PATH);
       fail(
-        "vhost directory is not referenced anywhere in /etc/nginx",
-        `add: include ${env.NGINX_VHOST_PATH}/*;  inside http { }`,
+        "nginx has NOT loaded any file from the vhost directory",
+        `${env.NGINX_VHOST_PATH} — every generated vhost is being ignored, so those ` +
+          "domains are served by whichever other site nginx matches. " +
+          (referenced
+            ? "The include line is present but matched no files at load time; reload nginx."
+            : `Add inside http { }: include ${env.NGINX_VHOST_PATH}/*;`),
       );
+    }
 
     // Without this map every generated vhost fails `nginx -t`.
-    const hasMap =
-      /map\s+\$http_upgrade\s+\$connection_upgrade/.test(nginxConf) ||
-      (await run("grep", ["-rl", "connection_upgrade", "/etc/nginx/"])).ok;
-    if (hasMap) pass("$connection_upgrade map present");
-    else
+    if (/map\s+\$http_upgrade\s+\$connection_upgrade/.test(effective.raw)) {
+      pass("$connection_upgrade map present");
+    } else {
       fail(
         "$connection_upgrade map missing",
         "every generated vhost will fail nginx -t. See docs/CUSTOM-DOMAINS-VPS.md step 2",
       );
-  }
+    }
 
-  // A default server that answers unknown hostnames with a plain 404 is correct
-  // for visitors but wrong for the two well-known paths: the ACME challenge and
-  // the routing probe. Both are fetched on a hostname that may not have a server
-  // block yet. The app now installs an HTTP-only vhost before requesting a
-  // certificate, which removes the hard dependency, but the carve-out is still
-  // what lets a CNAME/proxied domain prove routing in the first place.
-  const defaultServers = await run("grep", ["-rl", "default_server", "/etc/nginx/"]);
-  if (!defaultServers.ok) {
-    warn(
-      "no default_server found in /etc/nginx",
-      "any domain pointed at this IP gets served by whichever vhost nginx considers " +
-        "first. See docs/CUSTOM-DOMAINS-VPS.md step 3",
+    // A default server that answers unknown hostnames with a plain 404 is correct
+    // for visitors but wrong for the two well-known paths: the ACME challenge and
+    // the routing probe. Both are fetched on a hostname that may not have a vhost
+    // yet, which is the only way a CNAME or Cloudflare-proxied domain can prove
+    // it reaches this server.
+    const port80Defaults = effective.blocks.filter((b) =>
+      b.listens.some((l) => l.port === "80" && l.defaultServer),
     );
-  } else {
-    const files = defaultServers.out.split("\n").filter(Boolean);
-    const bodies = await Promise.all(
-      files.map((file) => fs.readFile(file, "utf8").catch(() => "")),
-    );
-    const combined = bodies.join("\n");
-    if (combined.includes("/.well-known/")) {
-      pass("default server forwards /.well-known/", files.join(", "));
+    if (port80Defaults.length === 0) {
+      warn(
+        "no default_server on port 80",
+        "any domain pointed at this IP is served by whichever block nginx matches " +
+          "first. See docs/CUSTOM-DOMAINS-VPS.md step 3",
+      );
+    } else if (port80Defaults.some((b) => b.servesWellKnown || b.servesAcmeChallenge)) {
+      pass(
+        "default server forwards the well-known path",
+        port80Defaults.map((b) => b.file).join(", "),
+      );
     } else {
       warn(
         "default server does not forward /.well-known/",
-        `${files.join(", ")} — a domain with no vhost of its own cannot answer the routing ` +
-          "probe, so CNAME and proxied (Cloudflare) domains may never verify. Add the " +
-          "acme-challenge and greviewpilot-domain-check carve-out from step 3",
+        `${port80Defaults.map((b) => b.file).join(", ")} — a domain with no vhost of its ` +
+          "own cannot answer the routing probe, so CNAME and proxied (Cloudflare) " +
+          "domains may never verify. Add the carve-out from step 3",
+      );
+    }
+
+    // Other sites sharing this nginx are the reason a correct vhost can still be
+    // bypassed, so name them rather than leaving them as a surprise.
+    const foreign = effective.blocks.filter(
+      (b) => !b.file.startsWith(env.NGINX_VHOST_PATH) && b.serverNames.some((n) => n !== "_"),
+    );
+    if (foreign.length > 0) {
+      console.log(
+        `  Other sites on this nginx: ${Array.from(
+          new Set(foreign.flatMap((b) => b.serverNames.filter((n) => n !== "_"))),
+        ).join(", ")}`,
+      );
+    }
+
+    const mixedBinds = selectFor(effective.blocks, "example.invalid", "80").explicitAddresses;
+    if (mixedBinds.length > 0) {
+      warn(
+        "port 80 has explicit bind addresses",
+        `${mixedBinds.join(", ")} — nginx selects the listening socket before server_name, ` +
+          "so generated vhosts using a wildcard `listen 80` are not in that group and will " +
+          "never be consulted for requests arriving on those addresses",
       );
     }
   }
@@ -431,18 +471,50 @@ if (!onLinux) {
       const { nginxManager } = await import(
         "../src/server/services/nginx/nginxManager.service"
       );
+      const { dumpEffectiveConfig, selectFor } = await import(
+        "../src/server/services/nginx/nginxInspector.service"
+      );
+      const live = await dumpEffectiveConfig().catch(() => null);
+
       const missing: string[] = [];
+      // A file on disk is not the same as a hostname nginx serves. Checking only
+      // for the file reported ✓ for a domain that nginx was ignoring, which is
+      // precisely the state that looked like an application bug.
+      const hijacked: string[] = [];
+
       for (const domain of connected) {
         const has = await nginxManager.hasVhost(domain.hostname).catch(() => false);
-        if (!has) missing.push(domain.hostname);
+        if (!has) {
+          missing.push(domain.hostname);
+          continue;
+        }
+        if (!live) continue;
+        const expected = nginxManager.vhostPath(domain.hostname);
+        const winner = selectFor(live.blocks, domain.hostname, "80");
+        const serving = (winner.exact[0] ?? winner.wildcard[0] ?? winner.defaults[0])?.file;
+        if (serving !== expected) {
+          hijacked.push(`${domain.hostname} -> ${serving ?? "nginx built-in default"}`);
+        }
       }
-      if (missing.length === 0) {
-        pass(`all ${connected.length} connected domain(s) have a vhost`);
-      } else {
+
+      if (missing.length > 0) {
         fail(
           `${missing.length} connected domain(s) have NO nginx vhost`,
           `${missing.join(", ")} — these hostnames 404 for visitors right now. Fix with: ` +
             "npm run ssl:provision -- --all",
+        );
+      }
+      if (hijacked.length > 0) {
+        fail(
+          `${hijacked.length} connected domain(s) have a vhost that nginx is NOT using`,
+          `${hijacked.join(", ")} — visitors get that other site instead, and ACME ` +
+            "validation 404s. Diagnose with: npm run ssl:provision -- --nginx <hostname>",
+        );
+      }
+      if (missing.length === 0 && hijacked.length === 0) {
+        pass(
+          `all ${connected.length} connected domain(s) are served by their own vhost`,
+          live ? undefined : "vhost files present (run as root to confirm nginx uses them)",
         );
       }
     }

@@ -311,16 +311,44 @@ async function lookup(record: DnsRecord, hostname: string): Promise<DnsCheck> {
       return { record, found, matched: found.includes(record.value) };
     }
     if (record.type === "CNAME") {
-      const found = await resolver.resolveCname(hostname);
-      const normalized = found.map((f) => f.replace(/\.$/, "").toLowerCase());
+      // Errors are handled inside this branch rather than by the outer catch,
+      // because a missing CNAME is not the end of the check — see the A-record
+      // fallback below. ENODATA here is the normal case for a subdomain that was
+      // pointed with an A record instead.
+      const raw = await resolver.resolveCname(hostname).catch(() => [] as string[]);
+      const normalized = raw.map((f) => f.replace(/\.$/, "").toLowerCase());
+      const target = record.value.toLowerCase();
+
+      // Accept a suffix match: providers often append the zone, and some
+      // proxies chain through an intermediate hostname.
+      if (normalized.some((f) => f === target || f.endsWith(`.${target}`))) {
+        return { record, found: normalized, matched: true };
+      }
+
+      /**
+       * Fall back to where the name actually resolves.
+       *
+       * What matters is that traffic arrives here, not the shape of the record
+       * that gets it here. Three common setups point at this server without ever
+       * naming our CNAME target:
+       *
+       *   www  CNAME  theirdomain.com   -> chains to their own apex A record
+       *   www  A      <our IP>          -> some registrars only offer A records
+       *   apex ALIAS/ANAME              -> flattened to A by the provider
+       *
+       * All three work. Reporting them as "Missing" told the customer to break a
+       * configuration that was already correct, which is the worst kind of wrong
+       * answer — theirs was the setup Hostinger's own UI produces by default.
+       */
+      const addresses = await resolver.resolve4(hostname).catch(() => [] as string[]);
+      const reachesUs = addresses.includes(APEX_IP);
+
       return {
         record,
-        found: normalized,
-        // Accept a suffix match: providers often append the zone, and some
-        // proxies chain through an intermediate hostname.
-        matched: normalized.some(
-          (f) => f === record.value.toLowerCase() || f.endsWith(`.${record.value.toLowerCase()}`),
-        ),
+        // Show whichever evidence exists, preferring the CNAME the user can see
+        // in their DNS panel over an address they did not type.
+        found: normalized.length > 0 ? normalized : addresses,
+        matched: reachesUs,
       };
     }
     const txt = await resolver.resolveTxt(target);

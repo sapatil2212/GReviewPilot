@@ -8,6 +8,7 @@
  * Usage:
  *   npm run ssl:provision -- --check                  show configuration and exit
  *   npm run ssl:provision -- --diagnose clinic.com    explain why HTTPS is not working
+ *   npm run ssl:provision -- --nginx clinic.com       which server block nginx uses
  *   npm run ssl:provision -- --preview clinic.com     print the nginx vhost
  *   npm run ssl:provision -- --host clinic.com        provision one domain
  *   npm run ssl:provision -- --all                    provision every connected domain
@@ -86,10 +87,18 @@ async function main() {
     return;
   }
 
+  // ---- Inspect nginx's effective config for a hostname ----
+  const nginxHost = value("nginx");
+  if (nginxHost) {
+    await inspectNginx(nginxHost);
+    return;
+  }
+
   // ---- Diagnose one hostname without contacting the CA ----
   const diagnoseHost = value("diagnose");
   if (diagnoseHost) {
     await diagnose(diagnoseHost);
+    await inspectNginx(diagnoseHost);
     return;
   }
 
@@ -191,6 +200,128 @@ async function main() {
     "\nNothing to do. Pass --check, --diagnose <host>, --preview <host>, --host <host>,\n" +
       "or --all. See the header of this file for the recommended order.",
   );
+}
+
+/**
+ * Report which server block nginx will actually use for a hostname.
+ *
+ * Reads `nginx -T`, not the files on disk. A vhost can exist, pass `nginx -t`,
+ * survive a reload and still never be consulted — because the directory holding
+ * it is not in the effective config, because another site already claims the
+ * hostname (nginx keeps the first and silently ignores the rest), or because the
+ * ports are bound to specific addresses and a wildcard `listen 80` is in a
+ * different socket group. All three look identical from the application side, and
+ * none of them are visible to a grep over /etc/nginx.
+ */
+async function inspectNginx(hostname: string) {
+  const { dumpEffectiveConfig, selectFor, includesVhostDirectory, NginxInspectionError } =
+    await import("../src/server/services/nginx/nginxInspector.service");
+  const { nginxManager } = await import("../src/server/services/nginx/nginxManager.service");
+
+  heading(`nginx effective config for ${hostname}`);
+
+  let config;
+  try {
+    config = await dumpEffectiveConfig();
+  } catch (err) {
+    if (err instanceof NginxInspectionError) {
+      console.log(`  ! could not read the effective config — ${err.message}`);
+      console.log("    Run this as root on the server: sudo nginx -T");
+      return;
+    }
+    throw err;
+  }
+
+  // The single most important line. If this is false, every generated vhost is
+  // inert no matter how correct its contents are.
+  const loaded = includesVhostDirectory(config);
+  console.log(
+    `  ${loaded ? "+" : "x"} vhost directory is in the effective config — ${env.NGINX_VHOST_PATH}`,
+  );
+  if (!loaded) {
+    console.log(
+      "      nginx has NOT loaded any file from this directory. Files written there\n" +
+        "      are ignored, which is why the hostname is served by another site.\n" +
+        "      A grep of /etc/nginx can find the include line in a sites-available\n" +
+        "      file that was never symlinked into sites-enabled — looking present and\n" +
+        "      doing nothing. Fix, inside the http { } block of /etc/nginx/nginx.conf:\n" +
+        `        include ${env.NGINX_VHOST_PATH}/*;\n` +
+        "      then: sudo nginx -t && sudo systemctl reload nginx",
+    );
+  }
+
+  const expectedFile = nginxManager.vhostPath(hostname);
+  for (const port of ["80", "443"]) {
+    const result = selectFor(config.blocks, hostname, port);
+    console.log(`\n  port ${port}:`);
+
+    if (result.exact.length === 0 && result.wildcard.length === 0) {
+      const target = result.defaults[0];
+      console.log(
+        `    x no server block declares "${hostname}" — served by ` +
+          (target ? `default_server in ${target.file}` : "nginx's built-in default"),
+      );
+      if (target) {
+        console.log(
+          `        that block answers for: ${target.serverNames.join(", ") || "(no server_name)"}`,
+        );
+        if (target.certificatePath) {
+          console.log(`        and presents: ${target.certificatePath}`);
+        }
+      }
+      if (port === "80") {
+        console.log(`      expected a block from: ${expectedFile}`);
+      }
+    } else {
+      for (const [index, block] of [...result.exact, ...result.wildcard].entries()) {
+        const winner = index === 0;
+        const ours = block.file === expectedFile;
+        console.log(
+          `    ${winner ? "+" : "x"} ${winner ? "SERVES" : "IGNORED"}  ${block.file}${ours ? "   <- ours" : ""}`,
+        );
+        console.log(
+          `        listen ${block.listens.map((l) => l.raw).join(" | ")}` +
+            `   server_name ${block.serverNames.join(" ")}`,
+        );
+        if (block.proxyPasses.length > 0) {
+          console.log(`        proxy_pass ${Array.from(new Set(block.proxyPasses)).join(", ")}`);
+        }
+        if (port === "80") {
+          console.log(
+            `        forwards /.well-known/acme-challenge/: ${block.servesAcmeChallenge ? "yes" : "NO"}`,
+          );
+        }
+      }
+      if (result.conflicting) {
+        console.log(
+          "\n      x Two or more blocks claim this hostname. nginx keeps the FIRST it\n" +
+            "        loads and ignores the rest, warning on reload rather than failing.\n" +
+            "        Remove the hostname from the other block, or make our include come\n" +
+            "        first in nginx.conf.",
+        );
+      }
+      const servingOurs = (result.exact[0] ?? result.wildcard[0])?.file === expectedFile;
+      if (!servingOurs && port === "80") {
+        console.log(
+          "\n      This is why validation 404s and visitors see the wrong site: the\n" +
+            "      hostname is being served by a block that is not ours.",
+        );
+      }
+    }
+
+    if (result.explicitAddresses.length > 0) {
+      console.log(
+        `    ! port ${port} has explicit bind address(es): ${result.explicitAddresses.join(", ")}`,
+      );
+      console.log(
+        "        nginx picks the listening socket BEFORE it looks at server_name, so a\n" +
+          "        block that only says `listen " +
+          port +
+          "` is not in that socket's group and\n" +
+          "        will never be consulted for requests arriving on that address.",
+      );
+    }
+  }
 }
 
 /**

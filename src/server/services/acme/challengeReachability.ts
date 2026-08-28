@@ -98,16 +98,36 @@ export async function checkChallengeReachability(
       };
     }
 
+    // Who answered matters more than the status code. Our own route replies
+    // `Not found` as text/plain; nginx's `return 404` replies with an HTML error
+    // page and a `Server: nginx` header. Those are completely different faults —
+    // the first means the token lookup failed, the second means the request never
+    // reached the app — and reporting them with one message sent debugging in the
+    // wrong direction for a long time.
+    const server = res.headers.get("server");
+    const fromApp = /^not found/i.test(body) && !/<html/i.test(body);
+    const origin = server ? ` Answered by "${server}"` : "";
+
     if (res.status === 404) {
-      // The most common real cause: the request reached *an* nginx, but not one
-      // that proxies this path to the app — a default server answering for a
-      // hostname that has no server block of its own.
+      if (fromApp) {
+        return {
+          reachable: false,
+          blocking: true,
+          detail:
+            "The request reached this app, but the challenge token was not found. " +
+            "The app is being served from a different database or process than the one " +
+            "that stored the token — check that pm2 and the CLI load the same .env.",
+        };
+      }
       return {
         reachable: false,
         blocking: true,
         detail:
-          "The ACME validation path returned 404. The domain resolves to a web server " +
-          "that is not forwarding /.well-known/acme-challenge/ to this app.",
+          "The ACME validation path returned 404 from a web server that is not this app." +
+          `${origin}. nginx is matching a different server block for this hostname — ` +
+          "usually because its vhost directory is not in nginx's effective config, or " +
+          "another site already claims the hostname. Run: " +
+          "npm run ssl:provision -- --nginx <hostname>",
       };
     }
 
@@ -116,8 +136,8 @@ export async function checkChallengeReachability(
       blocking: true,
       detail: res.ok
         ? "Something answered the ACME validation path, but not this deployment — " +
-          "the domain is pointing at a different server."
-        : `The ACME validation path returned ${res.status}.`,
+          `the domain is pointing at a different server or site.${origin}`
+        : `The ACME validation path returned ${res.status}.${origin}`,
     };
   } catch (err) {
     // Inconclusive, not fatal. See `blocking` above: a server that cannot reach

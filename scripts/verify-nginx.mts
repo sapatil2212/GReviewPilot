@@ -215,6 +215,134 @@ try {
 }
 check("validates the redirect target too", aliasThrew);
 
+console.log("\nEffective-config inspection (why a correct vhost can still be bypassed):");
+// Decisions are made on this parser's output, so it is asserted against a dump
+// that reproduces the real failure: a second site on the same nginx, a stock
+// default server, and our own vhost directory NOT included. Every symptom —
+// visitors getting the other site, ACME returning 404, the wrong certificate
+// being presented — follows from that last fact alone.
+{
+  const { parseServerBlocks, selectFor, nameMatches } = await import(
+    "../src/server/services/nginx/nginxInspector.service"
+  );
+
+  const dump = `
+# configuration file /etc/nginx/nginx.conf:
+events {}
+http {
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+    include /etc/nginx/sites-enabled/*;
+}
+
+# configuration file /etc/nginx/sites-enabled/default:
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    location ^~ /.well-known/ {
+        proxy_pass http://127.0.0.1:3003;
+    }
+    location / {
+        return 404;
+    }
+}
+
+# configuration file /etc/nginx/sites-enabled/bookmytime:
+server {
+    listen 443 ssl default_server;
+    server_name bookmytime.tech www.bookmytime.tech;
+    ssl_certificate /etc/letsencrypt/live/bookmytime.tech/fullchain.pem;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+    }
+}
+`;
+
+  const blocks = parseServerBlocks(dump);
+  check("finds every server block", blocks.length === 2, `${blocks.length}`);
+  check(
+    "attributes each block to the file nginx loaded it from",
+    blocks[0].file === "/etc/nginx/sites-enabled/default" &&
+      blocks[1].file === "/etc/nginx/sites-enabled/bookmytime",
+    blocks.map((b) => b.file).join(" | "),
+  );
+  check(
+    "reads server_name lists",
+    blocks[1].serverNames.join(",") === "bookmytime.tech,www.bookmytime.tech",
+    blocks[1].serverNames.join(","),
+  );
+  check("detects default_server", blocks[0].listens.some((l) => l.defaultServer));
+  check(
+    "recognises a /.well-known/ carve-out as covering acme-challenge",
+    blocks[0].servesWellKnown && blocks[0].servesAcmeChallenge,
+  );
+  check("reads the certificate path", blocks[1].certificatePath?.includes("bookmytime") === true);
+  check(
+    "does not treat the catch-all server_name _ as a hostname match",
+    !nameMatches("_", "greviewhub.com"),
+  );
+
+  // The diagnosis this has to produce for the reported failure.
+  const on80 = selectFor(blocks, "greviewhub.com", "80");
+  check(
+    "no block claims an unincluded domain on port 80",
+    on80.exact.length === 0 && on80.wildcard.length === 0,
+  );
+  check(
+    "names the default server that answers it instead",
+    on80.defaults[0]?.file === "/etc/nginx/sites-enabled/default",
+    on80.defaults[0]?.file,
+  );
+  const on443 = selectFor(blocks, "greviewhub.com", "443");
+  check(
+    "explains the wrong certificate on 443",
+    on443.exact.length === 0 &&
+      on443.defaults[0]?.certificatePath?.includes("bookmytime") === true,
+    "the TLS default_server presents its own certificate for any unmatched host",
+  );
+
+  // Conflicting server_name: nginx keeps the first and ignores the rest.
+  const conflict = parseServerBlocks(`
+# configuration file /etc/nginx/sites-enabled/other:
+server {
+    listen 80;
+    server_name greviewhub.com;
+}
+# configuration file /etc/nginx/greviewpilot-sites/greviewpilot-greviewhub.com.conf:
+server {
+    listen 80;
+    server_name greviewhub.com;
+}
+`);
+  const conflicted = selectFor(conflict, "greviewhub.com", "80");
+  check("detects two blocks claiming one hostname", conflicted.conflicting);
+  check(
+    "reports the first-loaded block as the winner",
+    conflicted.exact[0].file === "/etc/nginx/sites-enabled/other",
+    conflicted.exact[0].file,
+  );
+
+  // listen specificity: the socket is chosen before server_name is consulted.
+  const bound = parseServerBlocks(`
+# configuration file /etc/nginx/sites-enabled/pinned:
+server {
+    listen 77.37.47.89:80;
+    server_name pinned.example;
+}
+`);
+  check(
+    "surfaces explicit bind addresses as a selection hazard",
+    selectFor(bound, "anything.example", "80").explicitAddresses.join(",") === "77.37.47.89",
+  );
+  check(
+    "treats a wildcard listen as having no explicit address",
+    selectFor(blocks, "anything.example", "80").explicitAddresses.length === 0,
+  );
+}
+
 console.log("\nFilenames:");
 check("prefixed so unrelated vhosts are never touched", vhostFilename("clinic.com").startsWith(VHOST_PREFIX));
 check("filename matches the hostname", vhostFilename("clinic.com") === "greviewpilot-clinic.com.conf");

@@ -24,6 +24,7 @@ import {
   vhostFilename,
   assertSafeHostname,
 } from "./vhostTemplate";
+import { resolveHttp2Style } from "./nginxVersion.service";
 
 export class NginxError extends Error {
   constructor(message: string) {
@@ -153,6 +154,10 @@ export const nginxManager = {
         keyPath: options.keyPath,
         upstream: upstream(),
         redirectTo: options.redirectTo ?? null,
+        // Detected from the installed nginx, cached per process. Emitting the
+        // wrong form here fails `nginx -t`, which correctly refuses the reload
+        // and leaves the domain on HTTP with an unused certificate on disk.
+        http2: await resolveHttp2Style(),
       }),
     );
   },
@@ -205,19 +210,26 @@ export const nginxManager = {
     }
   },
 
-  /** Preview the generated config without touching the filesystem. */
-  preview(options: {
+  /**
+   * Preview the generated config without touching the filesystem.
+   *
+   * Async because it resolves the HTTP/2 form the same way `install` does. A
+   * preview that showed different syntax from what gets written would be worse
+   * than no preview at all — it is used precisely to check what will land.
+   */
+  async preview(options: {
     hostname: string;
     certPath: string;
     keyPath: string;
     redirectTo?: string | null;
-  }): string {
+  }): Promise<string> {
     return renderVhost({
       hostname: options.hostname,
       certPath: options.certPath,
       keyPath: options.keyPath,
       upstream: upstream(),
       redirectTo: options.redirectTo ?? null,
+      http2: await resolveHttp2Style(),
     });
   },
 

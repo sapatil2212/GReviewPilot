@@ -576,7 +576,7 @@ try {
 
   // The generated vhost for the alias must redirect rather than proxy.
   const { nginxManager } = await import("../src/server/services/nginx/nginxManager.service");
-  const aliasVhost = nginxManager.preview({
+  const aliasVhost = await nginxManager.preview({
     hostname: `www.${aliasApex}`,
     certPath: "/tmp/fullchain.pem",
     keyPath: "/tmp/privkey.pem",

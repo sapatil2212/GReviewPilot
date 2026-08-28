@@ -310,6 +310,7 @@ try {
     hostname,
     isPrimary: false,
     redirectToPrimary: false,
+    addWwwAlias: false,
   });
   check("domain added with DNS records", added.dnsRecords.length === 2, String(added.dnsRecords.length));
   check("apex domain is detected as apex", added.isApex);
@@ -373,6 +374,7 @@ try {
     hostname: secondaryHost,
     isPrimary: false,
     redirectToPrimary: true,
+    addWwwAlias: false,
   });
   const secondaryRecord = (await siteDomainService.list(ctx, site.id)).find(
     (d) => d.id === secondary.id,

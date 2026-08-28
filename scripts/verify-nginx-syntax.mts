@@ -38,12 +38,25 @@ function check(name: string, condition: boolean, detail?: string) {
   }
 }
 
+const { resolveHttp2Style, detectNginxVersion } = await import(
+  "../src/server/services/nginx/nginxVersion.service"
+);
+
+// Generate for the nginx actually installed here, so `nginx -t` below validates
+// what production would receive rather than a form this box happens to accept.
+const detected = await detectNginxVersion();
+const http2 = await resolveHttp2Style();
+console.log(
+  `nginx: ${detected ? detected.raw : "not detected"} — generating HTTP/2 as "${http2}"\n`,
+);
+
 const configs = {
   proxy: renderVhost({
     hostname: "clinic.com",
     certPath: "/etc/ssl/clinic.com/fullchain.pem",
     keyPath: "/etc/ssl/clinic.com/privkey.pem",
     upstream: "127.0.0.1:3000",
+    http2,
   }),
   alias: renderVhost({
     hostname: "www.clinic.com",
@@ -51,6 +64,7 @@ const configs = {
     keyPath: "/etc/ssl/www.clinic.com/privkey.pem",
     upstream: "127.0.0.1:3000",
     redirectTo: "clinic.com",
+    http2,
   }),
   // The pre-certificate block. Included here because it is the config a domain
   // runs on for the minutes (or, if issuance is failing, days) between DNS
@@ -152,6 +166,51 @@ http {
     // some builds, which is not a failure.
     const ok = result.out.includes("syntax is ok") || result.out.includes("test is successful");
     check("nginx accepts the generated config", ok, result.out.trim().slice(0, 400));
+    // The specific failure that shipped: `unknown directive "http2"`, from
+    // emitting `http2 on;` to an nginx older than 1.25.1.
+    check(
+      "no unknown-directive error",
+      !/unknown directive/i.test(result.out),
+      result.out.trim().slice(0, 300),
+    );
+
+    // Prove the version->syntax mapping against this nginx directly: the form we
+    // chose must load, and if this build predates 1.25.1 the other form must not.
+    // Without this the mapping is only ever asserted against itself.
+    const probeStyle = async (style: "directive" | "listen") => {
+      const styleDir = await fs.mkdtemp(path.join(os.tmpdir(), "grp-h2-"));
+      try {
+        const vh = path.join(styleDir, "vhosts");
+        await fs.mkdir(vh, { recursive: true });
+        await fs.writeFile(
+          path.join(vh, "probe.conf"),
+          renderVhost({
+            hostname: "probe.example",
+            certPath: "/etc/ssl/probe/fullchain.pem",
+            keyPath: "/etc/ssl/probe/privkey.pem",
+            upstream: "127.0.0.1:3000",
+            http2: style,
+          }),
+        );
+        const conf = path.join(styleDir, "nginx.conf");
+        await fs.writeFile(
+          conf,
+          `events {}\nhttp {\n  map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n  include ${vh.replace(/\\/g, "/")}/*.conf;\n}\n`,
+        );
+        const r = await run("nginx", ["-t", "-c", conf, "-p", styleDir]);
+        return !/unknown directive/i.test(r.out);
+      } finally {
+        await fs.rm(styleDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    };
+
+    check(`the chosen form ("${http2}") loads on this nginx`, await probeStyle(http2 === "off" ? "listen" : http2));
+    if (detected && detected.major === 1 && (detected.minor < 25 || (detected.minor === 25 && detected.patch < 1))) {
+      check(
+        `this nginx (${detected.raw}) rejects "http2 on;" — the bug is real and detection is necessary`,
+        !(await probeStyle("directive")),
+      );
+    }
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }

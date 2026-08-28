@@ -83,7 +83,7 @@ async function main() {
     const paths = certificatePaths(previewHost);
     heading(`nginx vhost for ${previewHost}`);
     console.log(`  would be written to: ${nginxManager.vhostPath(previewHost)}\n`);
-    console.log(nginxManager.preview({ hostname: previewHost, ...paths }));
+    console.log(await nginxManager.preview({ hostname: previewHost, ...paths }));
     return;
   }
 
@@ -287,14 +287,37 @@ async function inspectNginx(hostname: string) {
         `    ${ours ? "*" : " "} ${target.padEnd(22)} ${[...users].join("  ")}${ours ? "   <- APP_UPSTREAM" : ""}`,
       );
     }
-    const shared = [...byUpstream.entries()].find(
-      ([target, users]) => target === env.APP_UPSTREAM && users.size > 1,
+    // Many hostnames sharing OUR upstream is the intended architecture, not a
+    // fault: the platform host, its www alias and every tenant custom domain are
+    // all served by this one app, which distinguishes them from the Host header.
+    // Flagging that was a false alarm. The real collision is our upstream also
+    // being used by a vhost this app did not generate — that is a different
+    // product on the same port.
+    const foreignOnOurUpstream = config.blocks.filter(
+      (b) =>
+        !b.file.startsWith(env.NGINX_VHOST_PATH) &&
+        b.proxyPasses.some(
+          (t) => t.replace(/^https?:\/\//, "").replace(/\/$/, "") === env.APP_UPSTREAM,
+        ),
     );
-    if (shared) {
+    if (foreignOnOurUpstream.length > 0) {
       console.log(
-        `\n      x ${shared[0]} is shared by more than one site: ${[...shared[1]].join(", ")}\n` +
-          "        Whichever application actually owns that port serves all of them.",
+        `\n      x ${env.APP_UPSTREAM} is also used by vhost(s) this app did not generate:\n` +
+          foreignOnOurUpstream
+            .map((b) => `        ${b.file}  (${b.serverNames.join(", ")})`)
+            .join("\n") +
+          "\n        Only one application can own a port. Confirm which one, and give the\n" +
+          "        other its own.",
       );
+    } else {
+      const ourHosts = byUpstream.get(env.APP_UPSTREAM);
+      if (ourHosts && ourHosts.size > 1) {
+        console.log(
+          `\n      Note: ${ourHosts.size} hostnames share ${env.APP_UPSTREAM}. Expected —\n` +
+            "      the platform host and every tenant custom domain are served by this one\n" +
+            "      app, which tells them apart by the Host header.",
+        );
+      }
     }
   }
 

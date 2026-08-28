@@ -431,6 +431,47 @@ if (!onLinux) {
           "never be consulted for requests arriving on those addresses",
       );
     }
+
+    // Only a foreign vhost on our upstream is a collision. Our own hostnames
+    // sharing it — platform host, www alias, every tenant domain — is the design.
+    const foreignOnOurUpstream = effective.blocks.filter(
+      (b) =>
+        !b.file.startsWith(env.NGINX_VHOST_PATH) &&
+        b.proxyPasses.some(
+          (t) => t.replace(/^https?:\/\//, "").replace(/\/$/, "") === env.APP_UPSTREAM,
+        ),
+    );
+    if (foreignOnOurUpstream.length > 0) {
+      fail(
+        "another site proxies to APP_UPSTREAM",
+        `${foreignOnOurUpstream.map((b) => `${b.file} (${b.serverNames.join(",")})`).join("; ")} ` +
+          `also forwards to ${env.APP_UPSTREAM}. Only one app can own a port`,
+      );
+    } else {
+      pass("APP_UPSTREAM is not shared with another product's vhost", env.APP_UPSTREAM);
+    }
+
+    // The HTTP/2 form is version-specific and getting it wrong fails nginx -t,
+    // which blocks every HTTPS vhost. Worth stating outright.
+    const { detectNginxVersion, resolveHttp2Style } = await import(
+      "../src/server/services/nginx/nginxVersion.service"
+    );
+    const version = await detectNginxVersion();
+    const style = await resolveHttp2Style();
+    if (version) {
+      pass(`nginx ${version.raw}`, `generating HTTP/2 as "${style}"`);
+      if (style === "listen" && env.NGINX_HTTP2 === "auto") {
+        console.log(
+          "      This nginx predates 1.25.1, which has no standalone `http2` directive,\n" +
+            "      so the listen parameter is used. Correct — not a downgrade.",
+        );
+      }
+    } else {
+      warn(
+        "could not detect the nginx version",
+        `generating HTTP/2 as "${style}" (the compatible form). Set NGINX_HTTP2 to override`,
+      );
+    }
   }
 
   // Generated vhosts that are on disk but not loadable are invisible otherwise.

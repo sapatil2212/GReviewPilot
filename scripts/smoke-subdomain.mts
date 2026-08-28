@@ -197,14 +197,14 @@ try {
 
   console.log("\nReserved hostname rejection");
   let rootRejected = false;
-  await siteDomainService.add(ctxA, siteA.id, { hostname: ROOT, isPrimary: false, redirectToPrimary: false }).catch((err) => {
+  await siteDomainService.add(ctxA, siteA.id, { hostname: ROOT, isPrimary: false, redirectToPrimary: false, addWwwAlias: false }).catch((err) => {
     rootRejected = (err as { code?: string }).code === "VALIDATION_ERROR";
   });
   check("SITES_ROOT_DOMAIN itself cannot be added as a custom domain", rootRejected);
 
   let subdomainOfRootRejected = false;
   await siteDomainService
-    .add(ctxA, siteA.id, { hostname: `sneaky.${ROOT}`, isPrimary: false, redirectToPrimary: false })
+    .add(ctxA, siteA.id, { hostname: `sneaky.${ROOT}`, isPrimary: false, redirectToPrimary: false, addWwwAlias: false })
     .catch((err) => {
       subdomainOfRootRejected = (err as { code?: string }).code === "VALIDATION_ERROR";
     });

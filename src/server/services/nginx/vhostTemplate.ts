@@ -5,7 +5,14 @@
  * output can be asserted in tests. A malformed vhost fails `nginx -t` and, if it
  * ever reached a reload, would take every tenant site on the box down at once —
  * so this is the part most worth testing directly.
+ *
+ * The one thing it cannot be pure about is nginx's own version, because HTTP/2 is
+ * configured with different, mutually incompatible syntax either side of 1.25.1.
+ * That is passed in as `http2` rather than detected here, so this stays a pure
+ * function of its inputs and every form remains directly assertable.
  */
+
+import type { Http2Style } from "./nginxVersion.service";
 
 export interface VhostOptions {
   hostname: string;
@@ -20,6 +27,20 @@ export interface VhostOptions {
    * Applied at the edge so the redirect costs no application request.
    */
   redirectTo?: string | null;
+  /**
+   * How to enable HTTP/2, which is not the same syntax on every nginx.
+   *
+   * Required rather than defaulted. This used to hardcode `http2 on;`, a
+   * directive that does not exist before nginx 1.25.1, so on Ubuntu 24.04's
+   * 1.24.0 every generated HTTPS block failed `nginx -t` with
+   * `unknown directive "http2"`. The reload was then correctly refused, the
+   * HTTPS server block never loaded, and the domain sat on its HTTP-only vhost
+   * with a valid certificate unused on disk. Making the caller state the form
+   * means a new call site cannot silently reintroduce a version-specific guess.
+   *
+   * See nginxVersion.service.ts, which detects it.
+   */
+  http2: Http2Style;
 }
 
 export interface HttpOnlyVhostOptions {
@@ -30,6 +51,31 @@ export interface HttpOnlyVhostOptions {
 
 /** Prefix on every generated file, so unrelated vhosts are never touched. */
 export const VHOST_PREFIX = "greviewpilot-";
+
+/**
+ * The `listen` lines and any companion directive for the TLS server block.
+ *
+ * Kept together because the two forms are not interchangeable per line: with
+ * `listen` the parameter belongs on the IPv4 and IPv6 listeners, and with
+ * `directive` it must appear exactly once as its own statement. Splitting them
+ * across the template is how they drift apart.
+ */
+function tlsListenBlock(http2: Http2Style): string {
+  if (http2 === "listen") {
+    // nginx 1.9.5 .. 1.25.0. Also accepted, with a deprecation warning, on newer
+    // builds — which is why this is the safe fallback when the version is unknown.
+    return `    listen 443 ssl http2;
+    listen [::]:443 ssl http2;`;
+  }
+  if (http2 === "directive") {
+    // nginx >= 1.25.1 only.
+    return `    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;`;
+  }
+  return `    listen 443 ssl;
+    listen [::]:443 ssl;`;
+}
 
 /** Filename for a hostname's server block. */
 export function vhostFilename(hostname: string): string {
@@ -191,9 +237,7 @@ ${acmeLocation(options.upstream)}
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+${tlsListenBlock(options.http2)}
     server_name ${host};
 
     ssl_certificate     ${options.certPath};

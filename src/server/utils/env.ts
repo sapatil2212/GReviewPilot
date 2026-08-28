@@ -9,7 +9,15 @@
 
 import { z } from "zod";
 
-const EnvSchema = z.object({
+/**
+ * Exported so the derivation rules can be asserted against synthetic input.
+ *
+ * Testing them against `process.env` is unreliable here: Prisma Client re-reads
+ * `.env` when it initialises, which silently restores any variable a test tried
+ * to unset. Parsing an explicit object is the only way to state "APP_UPSTREAM is
+ * absent" and have it stay absent.
+ */
+export const EnvSchema = z.object({
   // App
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_URL: z.string().url(),
@@ -168,6 +176,14 @@ const EnvSchema = z.object({
   SSL_CERT_PATH: z.string().optional().default("/var/www/storage/greviewpilot/certs"),
   // Directory nginx includes server blocks from.
   NGINX_VHOST_PATH: z.string().optional().default("/etc/nginx/sites-enabled"),
+  // How generated HTTPS blocks enable HTTP/2.
+  //
+  // "auto" detects the installed nginx, which is required for correctness rather
+  // than convenience: `http2 on;` does not exist before nginx 1.25.1 and makes
+  // `nginx -t` fail outright, so a fixed choice breaks provisioning on every
+  // older nginx (Ubuntu 24.04 ships 1.24.0). Override only to force a form or to
+  // turn HTTP/2 off.
+  NGINX_HTTP2: z.enum(["auto", "directive", "listen", "off"]).default("auto"),
   // Command that validates and reloads nginx. Must be runnable by the app user
   // without a password — see docs/CUSTOM-DOMAINS-VPS.md for the sudoers entry.
   NGINX_RELOAD_COMMAND: z
@@ -214,10 +230,15 @@ const EnvSchema = z.object({
   // nothing in this app's logs records any of it, because the requests never
   // arrive. Deriving the default from PORT means the two cannot drift apart
   // unless an operator overrides it deliberately.
+  // Filled in from PORT by `deriveUpstream()` before parsing; the literal here is
+  // only the last resort when neither is set. The derivation cannot live in
+  // `.default()` because a field default cannot read a sibling field, and reading
+  // `process.env.PORT` from inside the schema made the rule invisible to any test
+  // that parses an explicit object.
   APP_UPSTREAM: z
     .string()
     .optional()
-    .default(() => `127.0.0.1:${process.env.PORT?.trim() || "3000"}`)
+    .default("127.0.0.1:3000")
     .refine((v) => /^[a-z0-9.-]+:\d+$/i.test(v), "APP_UPSTREAM must be host:port")
     .refine(
       (v) => !["80", "443"].includes(v.split(":")[1] ?? ""),
@@ -323,10 +344,35 @@ const RefinedEnvSchema = EnvSchema.superRefine((cfg, ctx) => {
 
 export type Env = z.infer<typeof EnvSchema>;
 
+/**
+ * Fill in `APP_UPSTREAM` from `PORT` when the operator has not set it.
+ *
+ * A pure function over the raw values, for two reasons. A Zod field default
+ * cannot read a sibling field, so the rule has to run before parsing; and it must
+ * be assertable without touching `process.env`, because Prisma Client re-reads
+ * `.env` on initialisation and restores anything a test tries to unset.
+ *
+ * Why derive at all: Node listens on `PORT` while nginx forwards every tenant
+ * custom domain to `APP_UPSTREAM`. When those disagree on a server hosting
+ * several apps, nginx proxies customers' domains into whichever *other*
+ * application owns that port — their visitors get a stranger's website and ACME
+ * validation fails against an app that has never seen the challenge token, with
+ * nothing in this app's logs recording it, because the requests never arrive.
+ * Tying the default to `PORT` means the two cannot drift apart unless an operator
+ * overrides it deliberately.
+ */
+export function deriveUpstream<T extends Record<string, string | undefined>>(raw: T): T {
+  if (raw.APP_UPSTREAM?.trim()) return raw;
+  const port = raw.PORT?.trim();
+  return { ...raw, APP_UPSTREAM: `127.0.0.1:${port || "3000"}` };
+}
+
 function parseEnv(): Env {
   // RefinedEnvSchema adds the cross-field checks. `Env` stays derived from the
   // base object schema so `EnvSchema.shape` remains usable elsewhere.
-  const parsed = RefinedEnvSchema.safeParse(process.env);
+  const parsed = RefinedEnvSchema.safeParse(
+    deriveUpstream(process.env as Record<string, string | undefined>),
+  );
   if (!parsed.success) {
     // Group errors by field for a readable message.
     const issues = parsed.error.issues

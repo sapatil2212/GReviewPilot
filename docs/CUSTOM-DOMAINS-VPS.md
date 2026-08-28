@@ -271,6 +271,11 @@ SITE_CNAME_TARGET=""
 PLATFORM_INCLUDE_WWW="true"
 
 SSL_PROVISIONING="nginx"
+# HTTP/2 syntax. "auto" detects the installed nginx, which is a correctness
+# requirement rather than a nicety: the standalone `http2 on;` directive does not
+# exist before nginx 1.25.1, and emitting it there fails nginx -t so no HTTPS
+# vhost can load. Override only to force a form or turn HTTP/2 off.
+NGINX_HTTP2="auto"
 ACME_DIRECTORY="staging"          # switch to production after a successful run
 ACME_CONTACT_EMAIL="ops@yourdomain.com"
 ACME_ACCOUNT_KEY_PATH="/var/www/storage/greviewpilot/acme/account.key"
@@ -668,6 +673,35 @@ npm run ssl:provision -- --host clinic.com --force
 `--diagnose` names it explicitly when the certificate on disk was issued by the
 staging CA.
 
+**`nginx -t` fails: unknown directive "http2".**
+HTTP/2 is configured differently either side of nginx 1.25.1:
+
+| nginx | Syntax |
+|---|---|
+| 1.9.5 – 1.25.0 | `listen 443 ssl http2;` |
+| 1.25.1+ | `listen 443 ssl;` plus `http2 on;` |
+
+The standalone `http2` directive
+([appeared in 1.25.1](http://nginx.org/en/docs/http/ngx_http_v2_module.html)) is an
+`unknown directive` on anything older — Ubuntu 24.04 ships 1.24.0 — which fails
+`nginx -t`, so the reload is refused and the HTTPS server block never loads. The
+domain keeps serving over its HTTP-only bootstrap vhost with a valid certificate
+sitting unused on disk.
+
+The generator detects the installed version and emits the matching form, so this
+needs no action. `npm run doctor` prints the detected version and the chosen form.
+If detection ever fails it uses the `listen` parameter, which is valid on every
+nginx that supports HTTP/2 at all (deprecated, warning only, on 1.25.1+) — a
+warning is recoverable, an unknown directive is not. Override with
+`NGINX_HTTP2=auto|directive|listen|off`.
+
+Vhosts written *before* this was fixed still contain the bad directive. They are
+rewritten in place by:
+
+```bash
+npm run ssl:provision -- --all --force
+```
+
 **`nginx -t` fails: unknown variable "connection_upgrade".**
 The `map` from step 2 is missing.
 
@@ -704,8 +738,8 @@ detects the proxy: the A record won't match `SITE_APEX_IP`.
 | `npm run doctor` | directory writability, sudo reload helper, live `nginx -t`, include glob, `$connection_upgrade` map, default-server `/.well-known/` carve-out, **every CONNECTED domain is served by its own vhost**, **`APP_UPSTREAM` really is this app**, DB, unused env vars |
 | `npm run ssl:provision -- --diagnose <host>` | one domain end to end: DB row, DNS, vhost, certificate on disk, CAA, live ACME path, served certificate, plus the nginx report below. Read-only, contacts no CA |
 | `npm run ssl:provision -- --nginx <host>` | reads `nginx -T` and names the server block that actually serves the hostname on 80 and 443, whether our vhost directory is loaded at all, hostname collisions, and listen-address hazards |
-| `npm run verify:nginx` | vhost generation (HTTPS, alias, and HTTP-only bootstrap), config-injection rejection, ACME path preserved on port 80, upstream not pointing at nginx |
-| `npm run verify:nginx:syntax` | brace/terminator structure, and real `nginx -t` when available |
+| `npm run verify:nginx` | vhost generation (HTTPS, alias, and HTTP-only bootstrap), **HTTP/2 syntax against every nginx version boundary**, **`APP_UPSTREAM` derivation from `PORT`**, config-injection rejection, ACME path preserved on port 80, upstream not pointing at nginx |
+| `npm run verify:nginx:syntax` | brace/terminator structure, and real `nginx -t` when available — including that the chosen HTTP/2 form loads and, on pre-1.25.1 builds, that the other form is genuinely rejected |
 | `npm run verify:tls` | certificate inspection against valid/expired/mismatched/self-signed hosts, CAA logic |
 | `npm run smoke:domain` | custom-domain routing, canonical redirects, SSL reconciliation, cron auth |
 

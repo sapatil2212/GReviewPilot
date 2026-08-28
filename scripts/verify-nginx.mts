@@ -40,6 +40,7 @@ const base = {
   certPath: "/var/www/storage/greviewpilot/certs/clinic.com/fullchain.pem",
   keyPath: "/var/www/storage/greviewpilot/certs/clinic.com/privkey.pem",
   upstream: "127.0.0.1:3000",
+  http2: "directive" as const,
 };
 
 console.log("Hostname validation (rejects config injection):");
@@ -104,7 +105,9 @@ for (const [label, patch] of [
 console.log("\nProxy vhost content:");
 const proxy = renderVhost(base);
 check("declares the hostname", proxy.includes("server_name clinic.com;"));
-check("listens on 80 and 443", proxy.includes("listen 80;") && proxy.includes("listen 443 ssl;"));
+// Matched loosely on purpose: the exact 443 line depends on the HTTP/2 form, and
+// pinning it here would make this assertion quietly specific to one nginx version.
+check("listens on 80 and 443", proxy.includes("listen 80;") && /listen 443 ssl/.test(proxy));
 check("references the certificate", proxy.includes(`ssl_certificate     ${base.certPath};`));
 check("references the key", proxy.includes(`ssl_certificate_key ${base.keyPath};`));
 check("proxies to the app", proxy.includes(`proxy_pass http://${base.upstream};`));
@@ -148,6 +151,129 @@ check(
   acmeBlock.indexOf("acme-challenge") < acmeBlock.indexOf("return 308"),
 );
 check("other port-80 traffic is redirected to HTTPS", acmeBlock.includes("return 308 https://"));
+
+console.log("\nHTTP/2 syntax must match the installed nginx:");
+// The regression this guards. `http2 on;` is a standalone directive that appeared
+// in nginx 1.25.1; on anything older (Ubuntu 24.04 ships 1.24.0) it is
+// `unknown directive "http2"`, a hard error. nginx -t then fails, the reload is
+// correctly refused, and the generated HTTPS block never loads — so the domain
+// stays on its HTTP-only vhost with a perfectly good certificate unused on disk.
+{
+  const {
+    parseNginxVersion,
+    supportsHttp2Directive,
+    http2StyleFor,
+  } = await import("../src/server/services/nginx/nginxVersion.service");
+
+  const listenForm = renderVhost({ ...base, http2: "listen" });
+  check(
+    "listen form puts http2 on both listeners",
+    listenForm.includes("listen 443 ssl http2;") &&
+      listenForm.includes("listen [::]:443 ssl http2;"),
+  );
+  check(
+    "listen form never emits the standalone directive",
+    !/^\s*http2\s+on;/m.test(listenForm),
+    "on nginx < 1.25.1 this is `unknown directive \"http2\"` and nginx -t fails",
+  );
+
+  const directiveForm = renderVhost({ ...base, http2: "directive" });
+  check(
+    "directive form emits http2 on exactly once",
+    (directiveForm.match(/^\s*http2\s+on;/gm) ?? []).length === 1,
+  );
+  check(
+    "directive form leaves the listen lines bare",
+    directiveForm.includes("listen 443 ssl;") && !directiveForm.includes("ssl http2;"),
+  );
+
+  const offForm = renderVhost({ ...base, http2: "off" });
+  check(
+    "off form mentions http2 nowhere",
+    !/http2/.test(offForm.replace(/#.*$/gm, "")),
+    "comments may mention it; directives must not",
+  );
+
+  // Version boundary, asserted against the real released versions.
+  const cases: Array<[string, boolean]> = [
+    ["nginx version: nginx/1.24.0 (Ubuntu)", false],
+    ["nginx version: nginx/1.25.0", false],
+    ["nginx version: nginx/1.25.1", true],
+    ["nginx version: nginx/1.26.0", true],
+    ["nginx version: nginx/1.27.4", true],
+    ["nginx version: nginx/2.0.0", true],
+    ["nginx version: nginx/1.18.0 (Ubuntu)", false],
+  ];
+  for (const [banner, expected] of cases) {
+    const parsed = parseNginxVersion(banner);
+    check(
+      `${banner.replace("nginx version: ", "")} -> ${expected ? "directive" : "listen"}`,
+      parsed !== null && supportsHttp2Directive(parsed) === expected,
+      parsed ? `parsed ${parsed.major}.${parsed.minor}.${parsed.patch}` : "did not parse",
+    );
+  }
+  check(
+    "the production server (1.24.0) gets the listen form",
+    http2StyleFor(parseNginxVersion("nginx/1.24.0")!) === "listen",
+  );
+  check("unparseable banner yields null", parseNginxVersion("not nginx at all") === null);
+}
+
+console.log("\nAPP_UPSTREAM derivation (must follow PORT, never drift to another app):");
+// Asserted against synthetic input rather than process.env, because Prisma Client
+// re-reads .env when it initialises and silently restores anything a test unsets —
+// which made an earlier check of this appear to fail when the logic was correct.
+{
+  const { EnvSchema, deriveUpstream } = await import("../src/server/utils/env");
+  // Pure input, so nothing in the process can interfere. Deleting from
+  // process.env is not usable here: Prisma Client re-reads .env when it
+  // initialises and silently restores the variable.
+  const derive = (raw: Record<string, string | undefined>) =>
+    deriveUpstream(raw).APP_UPSTREAM;
+
+  check(
+    "unset APP_UPSTREAM derives from PORT",
+    derive({ PORT: "3005" }) === "127.0.0.1:3005",
+    derive({ PORT: "3005" }),
+  );
+  check(
+    "the production configuration derives 127.0.0.1:3005",
+    derive({ PORT: "3005" }) === "127.0.0.1:3005",
+  );
+  check(
+    "unset APP_UPSTREAM with no PORT falls back to 3000",
+    derive({}) === "127.0.0.1:3000",
+    derive({}),
+  );
+  check(
+    "an explicit APP_UPSTREAM is never overridden",
+    derive({ PORT: "3005", APP_UPSTREAM: "127.0.0.1:4000" }) === "127.0.0.1:4000",
+    "operator intent must survive; the mismatch is reported instead",
+  );
+  check(
+    "whitespace-only APP_UPSTREAM is treated as unset",
+    derive({ PORT: "3005", APP_UPSTREAM: "  " }) === "127.0.0.1:3005",
+  );
+
+  // The derivation feeds the schema, so the end-to-end result is asserted too.
+  const parsed = EnvSchema.parse({
+    ...deriveUpstream({ ...process.env, APP_UPSTREAM: undefined, PORT: "3005" }),
+  });
+  check(
+    "the parsed env exposes the derived upstream",
+    parsed.APP_UPSTREAM === "127.0.0.1:3005",
+    parsed.APP_UPSTREAM,
+  );
+  for (const port of ["80", "443"]) {
+    let threw = false;
+    try {
+      EnvSchema.parse({ ...process.env, APP_UPSTREAM: `127.0.0.1:${port}` });
+    } catch {
+      threw = true;
+    }
+    check(`rejects nginx's own port ${port} (proxy loop)`, threw);
+  }
+}
 
 console.log("\nHTTP-only bootstrap vhost (breaks the no-cert/no-vhost deadlock):");
 // This block is what a domain gets between "DNS verified" and "certificate

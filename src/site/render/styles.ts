@@ -47,6 +47,10 @@ import {
 function declarations(style: StyleProps): Record<string, string> {
   const d: Record<string, string> = {};
   const space = (t?: string) => (t ? `var(--sb-space-${t})` : undefined);
+  // `auto` is a real CSS keyword, not a spacing token, so it must not be
+  // wrapped in var(--sb-space-auto) — which resolves to nothing and silently
+  // drops the declaration. Margins are the only properties that accept it.
+  const margin = (t?: string) => (t === "auto" ? "auto" : space(t));
 
   const put = (prop: string, value?: string | number) => {
     if (value === undefined || value === null || value === "") return;
@@ -69,10 +73,10 @@ function declarations(style: StyleProps): Record<string, string> {
   put("padding-right", space(style.paddingRight));
   put("padding-bottom", space(style.paddingBottom));
   put("padding-left", space(style.paddingLeft));
-  put("margin-top", space(style.marginTop));
-  put("margin-right", space(style.marginRight));
-  put("margin-bottom", space(style.marginBottom));
-  put("margin-left", space(style.marginLeft));
+  put("margin-top", margin(style.marginTop));
+  put("margin-right", margin(style.marginRight));
+  put("margin-bottom", margin(style.marginBottom));
+  put("margin-left", margin(style.marginLeft));
   put("width", style.width);
   put("max-width", style.maxWidth);
   put("min-height", style.minHeight);
@@ -239,6 +243,17 @@ export function documentCss(
  * Published pages must not inherit the dashboard's Tailwind preflight, and
  * the canvas must not inherit it either, or a Section would pick up the
  * app's margins. Everything here is scoped under `.sb-root`.
+ *
+ * Note the `[data-sb-reveal="on"]` gate on the animation rules. Hiding animated
+ * content unconditionally was a whole class of blank-section bug: the rule that
+ * un-hides it needs `data-sb-in="1"`, which only four of the thirty-one
+ * renderers ever set, yet NodeRenderer marks *any* animated node with
+ * `data-sb-anim`. Presets attach entrance animations to `Box` — service cards,
+ * team cards, pricing cards, testimonial cards, every section header — so all of
+ * those stayed at `opacity: 0` forever on a published page. Gating on an
+ * attribute that only the reveal script sets means content is visible unless JS
+ * is present and running, which is the correct direction for progressive
+ * enhancement.
  */
 export function baseCss(scope = ".sb-root"): string {
   return `
@@ -256,8 +271,8 @@ ${scope} .sb-rich p { margin-block: 0.75em; }
 ${scope} .sb-rich ul { list-style: disc; padding-left: 1.4em; margin-block: 0.75em; }
 ${scope} .sb-rich ol { list-style: decimal; padding-left: 1.4em; margin-block: 0.75em; }
 ${scope} .sb-rich a { color: var(--sb-color-primary); text-decoration: underline; }
-${scope} [data-sb-anim] { opacity: 0; }
-${scope} [data-sb-anim][data-sb-in="1"] { opacity: 1; }
+${scope}[data-sb-reveal="on"] [data-sb-anim] { opacity: 0; }
+${scope}[data-sb-reveal="on"] [data-sb-anim][data-sb-in="1"] { opacity: 1; }
 @media (prefers-reduced-motion: reduce) {
   ${scope} [data-sb-anim] { opacity: 1 !important; transform: none !important; transition: none !important; }
 }
@@ -286,7 +301,10 @@ export function animationCss(doc: SiteDocument, scope = ".sb-root"): string {
   for (const node of Object.values(doc.nodes)) {
     const anim = node.animation;
     if (!anim || anim.kind === "none") continue;
-    const sel = `${scope} [data-sb-id="${node.id}"]`;
+    // Gated on the same attribute as the opacity rules in baseCss: without the
+    // reveal script the element must keep its natural position, not sit
+    // permanently translated 24px down the page.
+    const sel = `${scope}[data-sb-reveal="on"] [data-sb-id="${node.id}"]`;
     const duration = anim.duration ?? 600;
     const delay = anim.delay ?? 0;
     const easing = anim.easing ?? "ease-out";

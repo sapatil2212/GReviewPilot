@@ -49,6 +49,8 @@ export const specItemSchema = z
     author: z.string().max(120).optional(),
     rating: z.number().min(1).max(5).optional(),
     value: z.string().max(40).optional(),
+    /** Trailing unit for a stat, e.g. "+" or "%". Omit when the number is exact. */
+    suffix: z.string().max(8).optional(),
     label: z.string().max(160).optional(),
     question: z.string().max(300).optional(),
     answer: z.string().max(2000).optional(),

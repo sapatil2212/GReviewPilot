@@ -97,6 +97,17 @@ export type SpacingToken =
   | "3xl"
   | "4xl";
 
+/**
+ * Margins additionally accept `auto`, which spacing tokens cannot express.
+ *
+ * Without it a width-capped block could not be centered at all. Presets tried
+ * to do it with `marginLeft: "none"`, which compiles to `margin-left: 0` — so
+ * every `maxWidth` box sat flush against the left edge of a 1200px container
+ * while its own text was centered. That is what made hero, page-header, FAQ and
+ * appointment sections look misaligned with a large empty gap on the right.
+ */
+export type MarginToken = SpacingToken | "auto";
+
 export type RadiusToken = "none" | "sm" | "md" | "lg" | "xl" | "full";
 
 export type ShadowToken = "none" | "sm" | "md" | "lg" | "xl";
@@ -149,10 +160,10 @@ export interface StyleProps {
   paddingRight?: SpacingToken;
   paddingBottom?: SpacingToken;
   paddingLeft?: SpacingToken;
-  marginTop?: SpacingToken;
-  marginRight?: SpacingToken;
-  marginBottom?: SpacingToken;
-  marginLeft?: SpacingToken;
+  marginTop?: MarginToken;
+  marginRight?: MarginToken;
+  marginBottom?: MarginToken;
+  marginLeft?: MarginToken;
 
   width?: string;
   maxWidth?: string;

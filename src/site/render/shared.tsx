@@ -27,7 +27,14 @@ import type { ActionSpec, RenderContext, SiteNode } from "@/site/document/types"
 export interface NodeAttrs {
   "data-sb-id": string;
   "data-sb-type": string;
+  /**
+   * Marks a node with an entrance animation. The page-level observer in
+   * SiteRenderer finds these and sets `data-sb-in`; individual renderers must
+   * not manage that themselves — when they did, the twenty-seven that never
+   * bothered rendered permanently invisible.
+   */
   "data-sb-anim"?: string;
+  "data-sb-anim-repeat"?: string;
   "data-sb-in"?: string;
   id?: string;
   className?: string;
@@ -194,13 +201,16 @@ export function ActionWrapper({
 // =====================================================================
 
 /**
- * Toggle `data-sb-in` when the element enters the viewport, which the CSS
- * in styles.ts uses to run entrance animations.
+ * Report when an element first enters the viewport, for effects that should
+ * start on scroll — currently the StatCounter count-up.
  *
- * IntersectionObserver rather than a scroll listener: no layout thrash, and
- * it works with lazy-rendered content. Elements start visible when there is
- * no animation or when reduced motion is requested, so content is never
- * hidden from someone who disabled animations.
+ * NOT for entrance animations any more, and not for visibility. Those are
+ * driven page-wide by the observer in SiteRenderer, because requiring each
+ * renderer to opt in meant the twenty-seven that did not opt in rendered
+ * permanently invisible. Do not reintroduce `data-sb-in` here.
+ *
+ * IntersectionObserver rather than a scroll listener: no layout thrash, and it
+ * works with lazy-rendered content.
  */
 export function useReveal<T extends HTMLElement>(enabled: boolean, repeat = false) {
   const ref = useRef<T | null>(null);

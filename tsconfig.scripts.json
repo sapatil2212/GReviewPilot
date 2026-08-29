@@ -1,0 +1,13 @@
+{
+  // The root config uses "jsx": "preserve" because Next.js owns that transform.
+  // Scripts that render components themselves (verify:site-render) run through
+  // tsx/esbuild with no Next in the loop, where "preserve" falls back to the
+  // classic React.createElement transform and fails with "React is not defined".
+  // The automatic runtime needs nothing in scope.
+  //
+  // Kept at the project root so the inherited "paths" stay correct.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}

@@ -435,6 +435,113 @@ const DEMO_STAFF: Record<string, Array<{ title: string; role: string }>> = {
 const DEMO_REVIEWERS = ["Priya S.", "Daniel M.", "Aisha K.", "Tom R."];
 
 /**
+ * Pick a service-card icon.
+ *
+ * Keyword match first so the icon actually relates to the service ("Teeth
+ * cleaning" gets a smile, "Airport transfer" gets a car), then a rotation
+ * through visually distinct generic icons so no two adjacent cards repeat.
+ *
+ * Every name here must exist in `SITE_ICONS` (src/site/render/icons.ts), which
+ * is a curated allowlist rather than the whole lucide set — an unlisted name
+ * resolves to the `Sparkles` fallback, which would silently undo the variety
+ * this function exists to add. `verify:site-render` asserts that.
+ */
+const SERVICE_ICON_KEYWORDS: Array<[RegExp, string]> = [
+  [/tooth|teeth|dental|smile|braces|align|implant|whiten/i, "Smile"],
+  [/clean|hygien|polish|scrub/i, "Sparkles"],
+  [/emergency|urgent|ambulance/i, "Ambulance"],
+  [/heart|cardio/i, "HeartPulse"],
+  [/bone|ortho|joint/i, "Bone"],
+  [/child|kid|paediatr|pediatr|matern|pregnan/i, "Baby"],
+  [/lab|test|diagnos|scan|x-?ray/i, "FlaskConical"],
+  [/consult|check-?up|advis/i, "Stethoscope"],
+  [/vaccin|inject|needle/i, "Syringe"],
+  [/coffee|espresso|brew|latte/i, "Coffee"],
+  [/dessert|cake|sweet|pastry|bake/i, "Cake"],
+  [/food|dish|menu|main course|starter|platter|sandwich|breakfast/i, "Utensils"],
+  [/drink|beverage|juice|bar\b|wine/i, "HandPlatter"],
+  [/room|suite|stay|accommodat/i, "Bed"],
+  [/transfer|transport|tyre|tire|engine|vehicle|\bcar\b|auto/i, "Car"],
+  [/paint|dent|bodywork/i, "Brush"],
+  [/banquet|event|hall|party/i, "PartyPopper"],
+  [/train|strength|gym|fitness|crossfit/i, "Dumbbell"],
+  [/yoga|mobility|stretch|medit/i, "Flower2"],
+  [/nutrition|diet|meal/i, "Leaf"],
+  [/hair|cut|styl|colour|color/i, "Scissors"],
+  [/facial|skin|beaut|makeup|bridal|nail|manicure|pedicure/i, "Gem"],
+  [/massage|therap|spa|aroma|relax/i, "HandHeart"],
+  [/school|class|academic|primary|secondary|tuition|course/i, "GraduationCap"],
+  [/sport|athlet/i, "Trophy"],
+  [/art|music|dance/i, "Music"],
+  [/sale|sell|buy|proper|resident|commercial|lease|rent/i, "Home"],
+  [/loan|mortgage|financ|valuation|tax/i, "PiggyBank"],
+  [/legal|law|court|arbitr|defence|defense|dispute/i, "Scale"],
+  [/corporate|business|company/i, "Briefcase"],
+  [/famil/i, "Users"],
+  [/brand|strateg|design|creativ/i, "Palette"],
+  [/market|seo|performance|ads|advertis/i, "TrendingUp"],
+  [/content|copy|blog|video|production/i, "Video"],
+  [/analytic|report|data|insight/i, "Activity"],
+  [/web|site|app|develop/i, "Laptop"],
+  [/deliver|shipping|courier/i, "Truck"],
+  [/gift|voucher/i, "Gift"],
+  [/insur|claim|warrant/i, "ShieldCheck"],
+  [/service|repair|maintain|servicing/i, "Wrench"],
+  [/arrival|new\b|trend|best seller|accessor/i, "ShoppingBag"],
+];
+
+const SERVICE_ICON_ROTATION = [
+  "Sparkles",
+  "ShieldCheck",
+  "HeartHandshake",
+  "BadgeCheck",
+  "Star",
+  "Award",
+  "Target",
+  "Package",
+];
+
+function matchServiceIcon(serviceName: string): string | null {
+  for (const [pattern, icon] of SERVICE_ICON_KEYWORDS) {
+    if (pattern.test(serviceName)) return icon;
+  }
+  return null;
+}
+
+/**
+ * Icons for a whole service list, avoiding adjacent repeats.
+ *
+ * Resolving each name independently is not enough: a dental list is six dental
+ * services, so keyword matching hands back "Smile" four times in a row, which
+ * looks exactly as generated as the single hardcoded icon it replaced. Choosing
+ * across the list lets a repeat fall through to the rotation, so neighbours
+ * always differ while the icon still relates to the service where it can.
+ */
+export function serviceIcons(serviceNames: string[]): string[] {
+  const out: string[] = [];
+  let rotation = 0;
+
+  for (const name of serviceNames) {
+    const matched = matchServiceIcon(name);
+    if (matched && matched !== out[out.length - 1]) {
+      out.push(matched);
+      continue;
+    }
+    // Either no keyword matched, or it would repeat the previous card. Walk the
+    // rotation until it differs from the neighbour.
+    let candidate = SERVICE_ICON_ROTATION[rotation % SERVICE_ICON_ROTATION.length];
+    while (candidate === out[out.length - 1]) {
+      rotation += 1;
+      candidate = SERVICE_ICON_ROTATION[rotation % SERVICE_ICON_ROTATION.length];
+    }
+    rotation += 1;
+    out.push(candidate);
+  }
+
+  return out;
+}
+
+/**
  * Build a complete SiteSpec from a blueprint alone.
  *
  * This is what runs when Gemini is unavailable. The copy is generic but
@@ -476,18 +583,23 @@ export function blueprintSpec(
           secondaryCtaLabel: ctx.phone ? "Call us" : "Learn more",
           imageQuery: blueprint.label,
         };
-      case "services":
+      case "services": {
+        // Every card used to get "Sparkles". Six identical icons down a grid is
+        // the clearest tell that a page was generated rather than designed, and
+        // it costs nothing to vary.
+        const icons = serviceIcons(services);
         return {
           preset,
           eyebrow: "What we offer",
           title: `Our ${blueprint.serviceNoun}s`,
           subtitle: "Clear options, honest advice, and no surprises.",
-          items: services.map((s) => ({
+          items: services.map((s, i) => ({
             title: s,
             description: `Professional ${s.toLowerCase()} delivered by an experienced team.`,
-            icon: "Sparkles",
+            icon: icons[i],
           })),
         };
+      }
       case "about":
         return {
           preset,

@@ -25,7 +25,7 @@ export const Page: SiteComponent = ({ attrs, children }) => (
   </div>
 );
 
-export const Section: SiteComponent = ({ node, attrs, children }) => {
+export const Section: SiteComponent = ({ node, attrs, children, ctx }) => {
   const as = (node.props.as as string) ?? "section";
   const contained = node.props.contained !== false;
   const anchorId = node.props.anchorId as string | undefined;
@@ -33,6 +33,22 @@ export const Section: SiteComponent = ({ node, attrs, children }) => {
   const Tag = (["section", "header", "footer", "main", "aside", "div"].includes(as)
     ? as
     : "section") as "section";
+
+  /**
+   * An empty section is a blank band, not a section.
+   *
+   * Presets give every section padding of `3xl` top and bottom, so a section
+   * whose contents were deleted leaves ~200px of nothing on the published page —
+   * reported as "some area showing blank". The editor still renders it, because
+   * an author needs somewhere to drop the replacement content.
+   *
+   * A background image or an explicit height means the band is deliberate
+   * (a decorative divider), so those are kept.
+   */
+  const isDecorative = Boolean(
+    node.style?.backgroundImage || node.style?.minHeight || node.style?.height,
+  );
+  if (!ctx.editor && node.children.length === 0 && !isDecorative) return null;
 
   return (
     <Tag {...attrs} id={anchorId || attrs.id}>
@@ -102,30 +118,26 @@ export const Divider: SiteComponent = ({ node, attrs }) => (
 // Typography
 // =====================================================================
 
+/**
+ * Reveal is not wired per component any more.
+ *
+ * These four used to own an IntersectionObserver each and set `data-sb-in`
+ * themselves; the other twenty-seven did not, which is why animated `Box`
+ * cards and section headers rendered invisible. SiteRenderer now runs one
+ * observer for the page, so a renderer only has to spread `attrs`.
+ */
 export const Heading: SiteComponent = ({ node, attrs }) => {
   const level = (node.props.level as string) ?? "h2";
   const Tag = (["h1", "h2", "h3", "h4", "h5", "h6"].includes(level) ? level : "h2") as "h2";
-  const { ref, inView } = useReveal<HTMLHeadingElement>(
-    Boolean(node.animation && node.animation.kind !== "none"),
-    node.animation?.repeat,
-  );
-  return (
-    <Tag {...attrs} ref={ref} data-sb-in={inView ? "1" : "0"}>
-      {String(node.props.text ?? "")}
-    </Tag>
-  );
+  return <Tag {...attrs}>{String(node.props.text ?? "")}</Tag>;
 };
 
 export const Text: SiteComponent = ({ node, attrs }) => {
   const as = (node.props.as as string) ?? "p";
   const Tag = (["p", "span", "div", "label"].includes(as) ? as : "p") as "p";
-  const { ref, inView } = useReveal<HTMLParagraphElement>(
-    Boolean(node.animation && node.animation.kind !== "none"),
-    node.animation?.repeat,
-  );
   // Preserve author line breaks without needing a rich-text editor.
   return (
-    <Tag {...attrs} ref={ref} data-sb-in={inView ? "1" : "0"} style={{ ...attrs.style, whiteSpace: "pre-line" }}>
+    <Tag {...attrs} style={{ ...attrs.style, whiteSpace: "pre-line" }}>
       {String(node.props.text ?? "")}
     </Tag>
   );
@@ -186,26 +198,23 @@ export const Image: SiteComponent = ({ node, attrs, ctx }) => {
   const caption = node.props.caption as string | undefined;
   const decorative = node.a11y?.decorative;
 
-  const { ref, inView } = useReveal<HTMLDivElement>(
-    Boolean(node.animation && node.animation.kind !== "none"),
-    node.animation?.repeat,
-  );
-
   const box = {
     ...attrs.style,
     ...(aspectRatio !== "auto" ? { aspectRatio } : {}),
     overflow: "hidden" as const,
   };
 
-  // An empty src is the normal state right after AI generation, before the
-  // user picks images. A labelled placeholder is far more useful than a
-  // broken-image icon, and it keeps layout stable.
+  // In the editor an empty src is a normal, actionable state, so it gets a
+  // labelled placeholder that keeps the layout stable while the author picks a
+  // photo. On a published page the same placeholder was just a 220px grey band
+  // with no text in it — one of the "blank areas" visitors were seeing. There is
+  // nothing to communicate to a visitor about a missing image, so render nothing
+  // and let the layout close up.
   if (!src) {
+    if (!ctx.editor) return null;
     return (
       <div
         {...attrs}
-        ref={ref}
-        data-sb-in={inView ? "1" : "0"}
         style={{
           ...box,
           minHeight: aspectRatio === "auto" ? "220px" : undefined,
@@ -219,7 +228,7 @@ export const Image: SiteComponent = ({ node, attrs, ctx }) => {
           border: "1px dashed var(--sb-color-border)",
         }}
       >
-        {ctx.editor ? "Click to add an image" : ""}
+        Click to add an image
       </div>
     );
   }
@@ -249,7 +258,7 @@ export const Image: SiteComponent = ({ node, attrs, ctx }) => {
 
   if (caption) {
     return (
-      <figure {...attrs} ref={ref} data-sb-in={inView ? "1" : "0"} style={box}>
+      <figure {...attrs} style={box}>
         {img}
         <figcaption
           style={{
@@ -265,7 +274,7 @@ export const Image: SiteComponent = ({ node, attrs, ctx }) => {
   }
 
   return (
-    <div {...attrs} ref={ref} data-sb-in={inView ? "1" : "0"} style={box}>
+    <div {...attrs} style={box}>
       {img}
     </div>
   );

@@ -20,6 +20,7 @@
     "verify:imagery": "tsx scripts/verify-imagery.mts",
     "verify:tls": "tsx scripts/verify-tls.mts",
     "verify:nginx": "tsx scripts/verify-nginx.mts",
+    "verify:site-render": "tsx --tsconfig tsconfig.scripts.json scripts/verify-site-render.mts",
     "verify:nginx:syntax": "tsx scripts/verify-nginx-syntax.mts",
     "ssl:provision": "tsx scripts/ssl-provision.mts",
     "doctor": "tsx scripts/deploy-doctor.mts",

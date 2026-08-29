@@ -48,6 +48,19 @@ export const pagePathSchema = z
   });
 
 const spacingToken = z.enum(["none", "xs", "sm", "md", "lg", "xl", "2xl", "3xl", "4xl"]);
+/** Spacing tokens plus `auto`, accepted only by margins (for centering). */
+const marginToken = z.enum([
+  "none",
+  "xs",
+  "sm",
+  "md",
+  "lg",
+  "xl",
+  "2xl",
+  "3xl",
+  "4xl",
+  "auto",
+]);
 const radiusToken = z.enum(["none", "sm", "md", "lg", "xl", "full"]);
 const shadowToken = z.enum(["none", "sm", "md", "lg", "xl"]);
 const fontSizeToken = z.enum(["xs", "sm", "base", "lg", "xl", "2xl", "3xl", "4xl", "5xl", "6xl"]);
@@ -89,10 +102,12 @@ export const styleSchema = z
     paddingRight: spacingToken.optional(),
     paddingBottom: spacingToken.optional(),
     paddingLeft: spacingToken.optional(),
-    marginTop: spacingToken.optional(),
-    marginRight: spacingToken.optional(),
-    marginBottom: spacingToken.optional(),
-    marginLeft: spacingToken.optional(),
+    // Margins also accept `auto` so a width-capped block can be centered;
+    // spacing tokens alone cannot express it. See MarginToken in document/types.
+    marginTop: marginToken.optional(),
+    marginRight: marginToken.optional(),
+    marginBottom: marginToken.optional(),
+    marginLeft: marginToken.optional(),
 
     width: cssLength.optional(),
     maxWidth: cssLength.optional(),

@@ -42,7 +42,14 @@ function NodeRendererInner({ nodeId, ctx, wrap }: NodeRendererProps): ReactNode 
   const attrs: NodeAttrs = {
     "data-sb-id": node.id,
     "data-sb-type": node.type,
-    ...(hasAnimation && !ctx.editor ? { "data-sb-anim": "1" } : {}),
+    ...(hasAnimation && !ctx.editor
+      ? {
+          "data-sb-anim": "1",
+          // Read by the page-level reveal observer in SiteRenderer to decide
+          // whether to keep watching after the first entrance.
+          ...(node.animation?.repeat ? { "data-sb-anim-repeat": "1" } : {}),
+        }
+      : {}),
     // Only the editor needs inline styles; published pages get a real
     // stylesheet with working media queries instead.
     ...(ctx.editor ? { style: inlineStyle(node, breakpoint) } : {}),

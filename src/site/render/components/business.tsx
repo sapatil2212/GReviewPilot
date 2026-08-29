@@ -15,7 +15,7 @@
 
 import { useMemo, useState } from "react";
 import { Menu, MessageCircle, Star, X } from "lucide-react";
-import type { RenderContext } from "@/site/document/types";
+import { BREAKPOINT_MAX_WIDTH, type RenderContext } from "@/site/document/types";
 import type { SiteComponent } from "../shared";
 import { trackEvent } from "../shared";
 import { resolveIcon, SOCIAL_ICONS } from "../icons";
@@ -189,9 +189,12 @@ export const Navbar: SiteComponent = ({ node, attrs, ctx }) => {
 
       {/* The mobile breakpoint is scoped to the navbar rather than driven by
           the responsive style system, because which links collapse is
-          structural, not stylistic. */}
+          structural, not stylistic. It uses the tablet breakpoint so the nav
+          switches at the same width as every other responsive override — at 860
+          it changed mid-way through the tablet range, so between 861 and 1024
+          a page had tablet spacing with a desktop nav that no longer fitted. */}
       <style>{`
-@media (max-width: 860px) {
+@media (max-width: ${BREAKPOINT_MAX_WIDTH.tablet}px) {
   [data-sb-id="${attrs["data-sb-id"]}"] .sb-nav-desktop { display: none !important; }
   [data-sb-id="${attrs["data-sb-id"]}"] .sb-nav-toggle { display: inline-flex !important; margin-left: auto; }
   [data-sb-id="${attrs["data-sb-id"]}"] .sb-nav-cta { display: none !important; }
@@ -1083,8 +1086,15 @@ export const CollectionList: SiteComponent = ({ node, attrs, ctx }) => {
         ...attrs.style,
         display: layout === "list" ? "flex" : "grid",
         flexDirection: layout === "list" ? "column" : undefined,
+        // `minmax(min(100%, …))` rather than a bare pixel minimum: the old
+        // `1100 / columns` made the track minimum 1100px at columns=1, so a
+        // single-column list overflowed every parent narrower than that —
+        // horizontal scroll on mobile and inside grid cells. The `min(100%, …)`
+        // wrapper lets the track shrink to the container when it has to.
         gridTemplateColumns:
-          layout === "grid" ? `repeat(auto-fit, minmax(${Math.floor(1100 / columns)}px, 1fr))` : undefined,
+          layout === "grid"
+            ? `repeat(auto-fit, minmax(min(100%, ${Math.max(200, Math.floor(900 / Math.max(1, columns)))}px), 1fr))`
+            : undefined,
         gap: "20px",
         ...(layout === "carousel" ? { display: "flex", overflowX: "auto", scrollSnapType: "x mandatory" } : {}),
       }}

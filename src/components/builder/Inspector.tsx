@@ -17,6 +17,7 @@ import { useState } from "react";
 import { ChevronDown, Info, Smartphone, Tablet } from "lucide-react";
 import type {
   Breakpoint,
+  MarginToken,
   SiteNode,
   SpacingToken,
   StyleProps,
@@ -42,7 +43,19 @@ export interface InspectorProps {
   };
 }
 
-const SPACING: SpacingToken[] = ["none", "xs", "sm", "md", "lg", "xl", "2xl", "3xl", "4xl"];
+const SPACING: readonly SpacingToken[] = [
+  "none",
+  "xs",
+  "sm",
+  "md",
+  "lg",
+  "xl",
+  "2xl",
+  "3xl",
+  "4xl",
+];
+/** Margins additionally offer `auto`, which is what centres a max-width block. */
+const MARGINS: readonly MarginToken[] = [...SPACING, "auto"];
 const FONT_SIZES = ["xs", "sm", "base", "lg", "xl", "2xl", "3xl", "4xl", "5xl", "6xl"] as const;
 const WEIGHTS = ["light", "normal", "medium", "semibold", "bold", "extrabold"] as const;
 const RADII = ["none", "sm", "md", "lg", "xl", "full"] as const;
@@ -212,6 +225,7 @@ export function Inspector({
       <Section title="Spacing">
         <BoxControl
           label="Padding"
+          tokens={SPACING}
           values={{
             top: resolvedStyle.paddingTop,
             right: resolvedStyle.paddingRight,
@@ -226,6 +240,9 @@ export function Inspector({
         />
         <BoxControl
           label="Margin"
+          // `auto` on left+right is how a max-width block gets centred; without
+          // it in this list the only way to centre one was raw CSS.
+          tokens={MARGINS}
           values={{
             top: resolvedStyle.marginTop,
             right: resolvedStyle.marginRight,
@@ -1038,17 +1055,26 @@ function ColorControl({
   );
 }
 
-/** Four-sided spacing control. */
-function BoxControl({
+/**
+ * Four-sided spacing control.
+ *
+ * Generic over the token type so the margin control can offer `auto` — which is
+ * the only way to centre a width-capped block, and was previously not expressible
+ * at all. Padding stays restricted to the spacing scale, where `auto` is
+ * meaningless.
+ */
+function BoxControl<T extends string>({
   label,
   values,
+  tokens,
   onChange,
 }: {
   label: string;
-  values: { top?: SpacingToken; right?: SpacingToken; bottom?: SpacingToken; left?: SpacingToken };
-  onChange: (side: "Top" | "Right" | "Bottom" | "Left", value: SpacingToken | undefined) => void;
+  values: { top?: T; right?: T; bottom?: T; left?: T };
+  tokens: readonly T[];
+  onChange: (side: "Top" | "Right" | "Bottom" | "Left", value: T | undefined) => void;
 }) {
-  const sides: Array<["Top" | "Right" | "Bottom" | "Left", SpacingToken | undefined]> = [
+  const sides: Array<["Top" | "Right" | "Bottom" | "Left", T | undefined]> = [
     ["Top", values.top],
     ["Right", values.right],
     ["Bottom", values.bottom],
@@ -1073,13 +1099,11 @@ function BoxControl({
             <span className="mb-0.5 block text-[10px] text-slate-400">{side}</span>
             <select
               value={value ?? ""}
-              onChange={(e) =>
-                onChange(side, (e.target.value || undefined) as SpacingToken | undefined)
-              }
+              onChange={(e) => onChange(side, (e.target.value || undefined) as T | undefined)}
               className="w-full rounded border border-slate-200 bg-white px-1.5 py-1 text-[11px] focus:border-blue-500 focus:outline-none"
             >
               <option value="">—</option>
-              {SPACING.map((token) => (
+              {tokens.map((token) => (
                 <option key={token} value={token}>
                   {token}
                 </option>

@@ -166,6 +166,8 @@ export interface PresetInput {
     author?: string;
     rating?: number;
     value?: string;
+    /** Trailing unit on a stat, e.g. "+" or "%". Empty by default. */
+    suffix?: string;
     label?: string;
     question?: string;
     answer?: string;
@@ -323,7 +325,8 @@ const heroCentered: PresetBuilder = (input) => {
         textAlign: "center",
         color: { value: "rgba(255,255,255,0.88)" },
         maxWidth: "62ch",
-        marginLeft: "none",
+        marginLeft: "auto",
+        marginRight: "auto",
       },
       animation: { kind: "fade-up", duration: 700, delay: 120 },
     }),
@@ -348,7 +351,17 @@ const heroCentered: PresetBuilder = (input) => {
 
   const inner = b.add("Box", {
     name: "Hero copy",
-    style: { ...stack("md", "center"), maxWidth: "820px", marginLeft: "none" },
+    // `marginInline: auto` is what actually centers a width-capped block. This
+    // said `marginLeft: "none"` before, which compiles to `margin-left: 0`, so
+    // the 820px copy block sat hard against the left edge of a 1200px container
+    // while its text was centre-aligned — the hero looked broken with a wide
+    // empty gap on the right.
+    style: {
+      ...stack("md", "center"),
+      maxWidth: "820px",
+      marginLeft: "auto",
+      marginRight: "auto",
+    },
     children: kids,
   });
 
@@ -440,7 +453,13 @@ const pageHeader: PresetBuilder = (input) => {
 
   const inner = b.add("Box", {
     name: "Page header copy",
-    style: { ...stack("md", "center"), textAlign: "center", maxWidth: "820px" },
+    style: {
+      ...stack("md", "center"),
+      textAlign: "center",
+      maxWidth: "820px",
+      marginLeft: "auto",
+      marginRight: "auto",
+    },
     children: kids,
   });
 
@@ -805,7 +824,11 @@ const stats: PresetBuilder = (input) => {
       name: item.label ?? `Stat ${i + 1}`,
       props: {
         value: item.value ?? "0",
-        suffix: "+",
+        // Was hardcoded to "+", which turned a 4.8 rating into "4.8+" and a
+        // 24-hour response time into "24+" — nonsense on the two stats most
+        // templates carry. A "+" only reads correctly on a round count, so the
+        // caller decides and the default is none.
+        suffix: item.suffix ?? "",
         label: item.label ?? "",
         animate: true,
       },
@@ -926,7 +949,9 @@ const faq: PresetBuilder = (input) => {
   const accordion = b.add("Accordion", {
     name: "FAQ",
     props: { items: items.slice(0, 30), allowMultiple: false, defaultOpenIndex: 0 },
-    style: { maxWidth: "820px", marginLeft: "none" },
+    // Centred under the centred section header; `marginLeft: "none"` left it
+    // hanging off to one side.
+    style: { maxWidth: "820px", marginLeft: "auto", marginRight: "auto" },
   });
   const section = b.add("Section", {
     name: "FAQ",
@@ -1112,7 +1137,7 @@ const appointment: PresetBuilder = (input) => {
   const form = b.add("Form", {
     name: "Appointment form",
     props: { submitLabel: input.ctaLabel ?? "Request appointment", layout: "two-column", showLabels: true },
-    style: { ...cardStyle(), maxWidth: "760px", marginLeft: "none" },
+    style: { ...cardStyle(), maxWidth: "760px", marginLeft: "auto", marginRight: "auto" },
   });
   const section = b.add("Section", {
     name: "Appointment",
